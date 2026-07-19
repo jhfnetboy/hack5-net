@@ -596,10 +596,26 @@ async function registerParticipant(request: Request, env: Env, tenant: Tenant | 
   const note = String(body?.note ?? "").trim().slice(0, 300) || null;
   if (!name) return json({ error: "请填写姓名 / Name required" }, 400);
   if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
-  const res = await env.DB.prepare(
-    "INSERT OR IGNORE INTO registrations (id, tenant_id, name, email, note, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+
+  const now = unixNow();
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  // Per-tenant capacity cap: stop unbounded DB growth from a single event.
+  const total = await env.DB.prepare("SELECT COUNT(*) AS c FROM registrations WHERE tenant_id = ?")
+    .bind(tenant.id)
+    .first<{ c: number }>();
+  if ((total?.c ?? 0) >= 5000) return json({ error: "报名已满 / Registration full" }, 403);
+  // Per-IP rate limit: block scripted floods with many distinct emails from one source.
+  const recent = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM registrations WHERE tenant_id = ? AND request_ip = ? AND created_at > ?",
   )
-    .bind(crypto.randomUUID(), tenant.id, name, email, note, unixNow())
+    .bind(tenant.id, ip, now - 60 * 60)
+    .first<{ c: number }>();
+  if ((recent?.c ?? 0) >= 20) return json({ error: "报名过于频繁,请稍后再试 / Too many requests" }, 429);
+
+  const res = await env.DB.prepare(
+    "INSERT OR IGNORE INTO registrations (id, tenant_id, name, email, note, created_at, request_ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(crypto.randomUUID(), tenant.id, name, email, note, now, ip)
     .run();
   if (res.meta.changes !== 1) return json({ ok: true, already: true }); // idempotent: already registered
   return json({ ok: true });
@@ -613,7 +629,11 @@ async function listRegistrations(request: Request, env: Env, tid: string | null)
   )
     .bind(tid)
     .all<{ name: string; email: string; note: string | null; created_at: number }>();
-  return json({ count: rows.results.length, registrations: rows.results });
+  // Total count is separate from the (capped) list so a >2000-row event still reports the true number.
+  const total = await env.DB.prepare("SELECT COUNT(*) AS c FROM registrations WHERE tenant_id = ?")
+    .bind(tid)
+    .first<{ c: number }>();
+  return json({ count: total?.c ?? rows.results.length, registrations: rows.results });
 }
 
 async function exportRegistrations(request: Request, env: Env, tid: string | null): Promise<Response> {
@@ -1117,7 +1137,10 @@ async function exportScores(request: Request, env: Env, tid: string | null): Pro
 }
 
 function csvCell(value: unknown): string {
-  const s = String(value ?? "");
+  let s = String(value ?? "");
+  // Neutralize Excel/Sheets formula injection: a leading =,+,-,@ (or tab/CR) makes the cell
+  // execute as a formula. Prefix with a single quote so it is treated as literal text.
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
