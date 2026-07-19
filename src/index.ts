@@ -1030,11 +1030,10 @@ const APP_HTML = String.raw`<!doctype html>
   <header>
     <div class="brand" onclick="go('/')">
       <svg width="32" height="32" viewBox="0 0 40 40" aria-hidden="true" style="flex:0 0 auto">
-        <defs><linearGradient id="hklg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6a5cf0"/><stop offset="1" stop-color="#4536c9"/></linearGradient></defs>
-        <rect width="40" height="40" rx="11" fill="url(#hklg)"/>
-        <path d="M12 13 6.5 20 12 27" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" opacity=".8"/>
-        <path d="M28 13 33.5 20 28 27" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" opacity=".8"/>
-        <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#fff">5</text>
+        <rect width="40" height="40" rx="11" fill="#0a0e0a"/>
+        <path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text>
       </svg>
       <span id="brandName">hack5</span></div>
     <nav id="nav"></nav>
@@ -1071,7 +1070,8 @@ const APP_HTML = String.raw`<!doctype html>
     const n = document.getElementById('nav');
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
           + '<button class="ghost" onclick="go(\'/guide\')">'+t('如何成为创新者','Become a builder')+'</button>'
-          + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>';
+          + '<button class="ghost" onclick="go(\'/submit\')">'+t('提交作品','Submit')+'</button>'
+          + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
          + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
@@ -1094,6 +1094,8 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/submit') return renderSubmit();
     if(p === '/judge') return renderJudge();
     if(p === '/guide') return renderGuide();
+    if(p === '/about') return renderAbout();
+    if(p === '/start') return renderStart();
     if(p === '/leaderboard') return renderLeaderboard();
     if(p === '/invites') return renderInvites();
     if(p === '/judges') return renderJudges();
@@ -1155,6 +1157,36 @@ const APP_HTML = String.raw`<!doctype html>
       + '</div>'
       + '<div class="guide-cta"><h2>'+t('准备好了吗?','Ready?')+'</h2><button onclick="go(\'/submit\')">'+t('提交你的作品 →','Submit your project →')+'</button></div>'
       + '</div>';
+  }
+
+  // ---------------- about ----------------
+  function renderAbout(){
+    const feats = [
+      ['⚡', t('10 分钟发起','Live in 10 minutes'), t('三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。','Three steps: log in → name it → deploy your own hackathon site on its own domain.')],
+      ['🆓', t('永久免费','Free forever'), t('发起、组织、展示全免费,你的所有作品与记录永久保留。','Launching, organizing and showcasing are free; all your projects and records are kept forever.')],
+      ['🌱', t('数字公共物品','A digital public good'), t('hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
+    ];
+    app.innerHTML = '<div class="guide">'
+      + '<div class="guide-hero"><h1>'+t('关于 hack5','About hack5')+'</h1>'
+      + '<p class="guide-sub">'+t('人人可办的黑客松平台','a hackathon platform anyone can run')+'</p></div>'
+      + '<div class="panel" style="font-size:16px;line-height:1.8;color:#3c4250">'
+      + t('<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它是一个<b>免费</b>的黑客松发起与组织工具:任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点,组织自己的黑客松,并<b>永久免费保留</b>所有记录。',
+          '<b>hack5.net</b> is part of <b>Mycelium</b> — a Digital Public Goods organization. It is a <b>free</b> tool for launching and organizing hackathons: anyone can spin up their own hackathon site in <b>10 minutes</b>, run their own event, and keep every record <b>free, forever</b>.')
+      + '</div>'
+      + '<div class="guide-steps" style="margin-top:20px">'
+      + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
+      + '</div>'
+      + '<div class="guide-cta"><h2>'+t('办一场属于你的黑客松','Run your own hackathon')+'</h2><button onclick="go(\'/start\')">'+t('发起黑客松 →','Start a hackathon →')+'</button></div>'
+      + '</div>';
+  }
+
+  function renderStart(){
+    app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('发起黑客松','Start a hackathon')+'</h1>'
+      + '<p class="guide-sub">'+t('登录 → 取名 → 一键部署','log in → name it → deploy')+'</p></div>'
+      + '<div class="panel" style="text-align:center;padding:40px">'
+      + '<p style="font-size:16px">'+t('一键发起功能正在上线中 —— 你将能在 10 分钟内拥有一个独立域名的黑客松站点。','One-click launch is coming soon — you will get your own hackathon site, on its own domain, in 10 minutes.')+'</p>'
+      + '<div class="row" style="justify-content:center;margin-top:16px"><button class="ghost" onclick="go(\'/about\')">'+t('← 了解 hack5','← About hack5')+'</button></div>'
+      + '</div></div>';
   }
 
   function card(s){
