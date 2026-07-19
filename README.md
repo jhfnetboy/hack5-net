@@ -6,6 +6,11 @@ A hackathon submission & showcase portal. Each team submits a **GitHub repo + a 
 
 **Live / 线上:** <https://hackvideo.jhfnetboy.workers.dev>
 
+![HackVideo 作品详情页 / project detail page](docs/screenshot-detail.jpg)
+
+> 作品详情页:内嵌演示视频、GitHub 信息、README、截图与评委打分。
+> A project page — embedded demo video, GitHub info, README, screenshots and judge scoring.
+
 ---
 
 ## 三种角色与入口 / Roles & entry points
