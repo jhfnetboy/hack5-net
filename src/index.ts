@@ -448,7 +448,7 @@ async function serveOrgLogo(env: Env, sub: string): Promise<Response> {
   const parsed = row?.logo ? dataUrlToBytes(row.logo) : null;
   if (!parsed) return json({ error: "Not found" }, 404);
   return new Response(parsed.bytes, {
-    headers: { "Content-Type": parsed.contentType, "Cache-Control": "public, max-age=3600" },
+    headers: { "Content-Type": parsed.contentType, ...UPLOAD_SERVE_HEADERS },
   });
 }
 
@@ -559,11 +559,16 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   }
   if (RESERVED_SUBDOMAINS.has(subdomain)) return json({ error: "该子域名被保留 / Reserved subdomain" }, 400);
   if (intro.length < 10) return json({ error: "请写一段黑客松简介(至少 10 字)/ Add an intro (10+ chars)" }, 400);
-  const bannerParsed = dataUrlToBytes(String(body?.banner ?? ""));
-  if (!bannerParsed || !bannerParsed.contentType.startsWith("image/")) {
-    return json({ error: "请上传一张 banner 图 / A banner image is required" }, 400);
+  // Banner is optional — if omitted, the homepage shows a generated default. If provided it must be
+  // a small raster image (no SVG, to avoid stored-XSS when the blob is fetched directly).
+  let bannerParsed: { contentType: string; bytes: Uint8Array } | null = null;
+  if (body?.banner) {
+    bannerParsed = dataUrlToBytes(String(body.banner));
+    if (!bannerParsed || !isRasterImage(bannerParsed.contentType)) {
+      return json({ error: "Banner 需为图片(PNG/JPG),不支持 SVG / Banner must be a raster image" }, 400);
+    }
+    if (bannerParsed.bytes.byteLength > 160 * 1024) return json({ error: "banner 图过大(≤120KB)/ Banner too large" }, 400);
   }
-  if (bannerParsed.bytes.byteLength > 160 * 1024) return json({ error: "banner 图过大(≤120KB)/ Banner too large" }, 400);
 
   const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(subdomain).first();
   if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
@@ -581,7 +586,7 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const now = unixNow();
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, banner, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, '1', 'active', ?, ?)",
+    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
   )
     .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, intro, now, now)
     .run();
@@ -605,8 +610,11 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     return json({ error: "子域名配置失败,请重试 / Subdomain setup failed", detail: dnsErr }, 502);
   }
 
-  // Store the banner image now that the tenant is confirmed (survived quota + DNS).
-  await env.SHOTS.put(`banner:${id}`, bannerParsed.bytes, { metadata: { contentType: bannerParsed.contentType } });
+  // Store the banner now that the tenant is confirmed (survived quota + DNS); flag only after it lands.
+  if (bannerParsed) {
+    await env.SHOTS.put(`banner:${id}`, bannerParsed.bytes, { metadata: { contentType: bannerParsed.contentType } });
+    await env.DB.prepare("UPDATE tenants SET banner = '1' WHERE id = ?").bind(id).run();
+  }
 
   const root = env.ROOT_DOMAIN || "hack5.net";
   const url = `https://${subdomain}.${root}`;
@@ -1005,8 +1013,8 @@ async function servePhoto(env: Env, tid: string, id: string): Promise<Response> 
   return new Response(value, {
     headers: {
       "Content-Type": metadata?.contentType || "image/jpeg",
-      "Cache-Control": "public, max-age=3600",
       "X-Robots-Tag": "noindex",
+      ...UPLOAD_SERVE_HEADERS,
     },
   });
 }
@@ -1022,7 +1030,7 @@ async function serveBanner(env: Env, sub: string): Promise<Response> {
   });
   if (!value) return json({ error: "Not found" }, 404);
   return new Response(value, {
-    headers: { "Content-Type": metadata?.contentType || "image/jpeg", "Cache-Control": "public, max-age=3600" },
+    headers: { "Content-Type": metadata?.contentType || "image/jpeg", ...UPLOAD_SERVE_HEADERS },
   });
 }
 
@@ -1031,7 +1039,7 @@ async function updateBanner(request: Request, env: Env, tenant: Tenant | null): 
   if (!auth || !tenant) return json({ error: "Admin only" }, 403);
   const body = await request.json<{ banner?: string }>().catch(() => null);
   const parsed = dataUrlToBytes(String(body?.banner ?? ""));
-  if (!parsed || !parsed.contentType.startsWith("image/")) return json({ error: "请上传图片 / Image required" }, 400);
+  if (!parsed || !isRasterImage(parsed.contentType)) return json({ error: "请上传图片 / Image required" }, 400);
   if (parsed.bytes.byteLength > 160 * 1024) return json({ error: "图片过大(≤120KB)/ Too large" }, 400);
   await env.SHOTS.put(`banner:${tenant.id}`, parsed.bytes, { metadata: { contentType: parsed.contentType } });
   await env.DB.prepare("UPDATE tenants SET banner = '1' WHERE id = ?").bind(tenant.id).run();
@@ -1053,7 +1061,7 @@ async function uploadPhotos(request: Request, env: Env, tenant: Tenant | null): 
   let saved = 0;
   for (const item of items) {
     const parsed = dataUrlToBytes(item?.dataUrl);
-    if (!parsed || !parsed.contentType.startsWith("image/")) continue;
+    if (!parsed || !isRasterImage(parsed.contentType)) continue;
     if (parsed.bytes.byteLength > MAX_PHOTO_BYTES) return json({ error: "单张需 ≤120KB / Each photo must be ≤120KB" }, 400);
     const id = crypto.randomUUID();
     await env.SHOTS.put(`photo:${tenant.id}:${id}`, parsed.bytes, { metadata: { contentType: parsed.contentType } });
@@ -1166,7 +1174,7 @@ async function createSubmission(request: Request, env: Env, tid: string | null):
   const decoded: { contentType: string; bytes: Uint8Array }[] = [];
   for (const shot of shots) {
     const parsed = dataUrlToBytes(shot);
-    if (!parsed || !parsed.contentType.startsWith("image/")) {
+    if (!parsed || !isRasterImage(parsed.contentType)) {
       return json({ error: "截图必须是图片 / Screenshots must be images" }, 400);
     }
     if (parsed.bytes.byteLength > maxShotBytes) {
@@ -1723,6 +1731,19 @@ function isHttpUrl(s: string): boolean {
   }
 }
 
+// Only raster images may be uploaded — an SVG could carry <script> and execute as a document
+// when its KV blob is fetched directly at its same-origin URL (stored XSS). Reject SVG/anything else.
+const RASTER_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"]);
+function isRasterImage(contentType: string): boolean {
+  return RASTER_IMAGE_TYPES.has(contentType.toLowerCase());
+}
+// Defense-in-depth headers for any user-uploaded binary we serve back.
+const UPLOAD_SERVE_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "Content-Security-Policy": "default-src 'none'; sandbox",
+  "Cache-Control": "public, max-age=3600",
+};
+
 function dataUrlToBytes(dataUrl: unknown): { contentType: string; bytes: Uint8Array } | null {
   const s = String(dataUrl ?? "");
   if (!s.startsWith("data:")) return null;
@@ -1978,6 +1999,11 @@ const APP_HTML = String.raw`<!doctype html>
     .tenant-hero{margin-bottom:18px}
     .hero-banner{margin:-20px -20px 16px;overflow:hidden;aspect-ratio:1280/440;background:var(--ghost-hover)}
     .hero-banner img{width:100%;height:100%;object-fit:cover;display:block}
+    .hero-default{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;
+      background:radial-gradient(120% 140% at 82% 8%,rgba(91,75,230,.55),transparent 55%),radial-gradient(120% 140% at 8% 96%,rgba(37,255,134,.16),transparent 55%),linear-gradient(160deg,#141a2e,#0b0f1a 60%,#080a12)}
+    .hero-default .hd-badge{font-family:ui-monospace,Menlo,monospace;font-weight:800;color:#25ff86;font-size:26px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:4px 12px}
+    .hero-default .hd-name{color:#fff;font-weight:800;font-size:clamp(20px,3.4vw,34px);letter-spacing:-.01em;padding:0 16px}
+    .hero-default .hd-sub{color:#aeb6cc;font-family:ui-monospace,Menlo,monospace;font-size:13px}
     .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:var(--ink2);font-size:14px;font-weight:600}
     .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
     .map-links{margin-top:10px;font-size:13px;color:var(--muted)}
@@ -2388,7 +2414,7 @@ const APP_HTML = String.raw`<!doctype html>
           ? '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
             + '<label>'+t('子域名','Subdomain')+' <span class="muted">.hack5.net</span></label><input id="hSub" maxlength="30" placeholder="shanghai2026">'
             + '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…,欢迎…','A hackathon about… for… come build…')+'"></textarea>'
-            + '<label>'+t('首页 Banner 图','Homepage banner')+' * <span class="muted">'+t('(宽图,自动裁 16:9)','(wide image, auto-cropped 16:9)')+'</span></label><input id="hBanner" type="file" accept="image/*"><div id="hBannerPrev"></div>'
+            + '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款;宽幅,自动裁并压 ≤120KB)','(optional — a default is generated; wide, ≤120KB)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>'
             + '<div class="row" style="margin-top:14px"><button id="hCreate">'+t('创建并部署','Create & deploy')+'</button></div><div id="hMsg"></div>'
           : '<div class="notice">'+t('已达免费额度。充值 ¥99 可举办 100 场。','Free quota reached. Upgrade (¥99) for 100 hackathons.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('充值 ¥99','Upgrade ¥99')+'</button></div>')
       + '</div></div>';
@@ -2402,7 +2428,6 @@ const APP_HTML = String.raw`<!doctype html>
         const name=$('#hName').value.trim(), subdomain=$('#hSub').value.trim().toLowerCase(), intro=$('#hIntro').value.trim();
         if(!name || !subdomain){ setMsg('hMsg', t('请填写名称和子域名','Fill in name and subdomain'), true); return; }
         if(intro.length<10){ setMsg('hMsg', t('请写至少 10 字的简介','Add a 10+ character intro'), true); return; }
-        if(!window.__hBanner){ setMsg('hMsg', t('请上传一张 Banner 图','Upload a banner image'), true); return; }
         $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
         try {
           const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,banner:window.__hBanner}});
@@ -2451,8 +2476,9 @@ const APP_HTML = String.raw`<!doctype html>
     const ag = tn.agenda || [];
     const agHtml = ag.length ? '<div class="agenda"><div class="ag-h">'+t('日程 · Agenda','Agenda')+'</div>'
       + ag.map(a=>'<div class="ag-item"><span class="ag-t">'+esc(a.time||'')+'</span><span class="ag-x">'+esc(a.title||'')+'</span></div>').join('')+'</div>' : '';
-    const banner = tn.hasBanner ? '<div class="hero-banner"><img src="/banner/'+esc(tn.subdomain)+'" alt=""></div>' : '';
-    if(!banner && !tn.intro && !bits.length && !tn.address && !map && !agHtml) return '';
+    const banner = tn.hasBanner
+      ? '<div class="hero-banner"><img src="/banner/'+esc(tn.subdomain)+'" alt=""></div>'
+      : '<div class="hero-banner hero-default"><span class="hd-badge">&#8249;5&#8250;</span><span class="hd-name">'+esc(tn.name||'Hackathon')+'</span><span class="hd-sub">'+esc((tn.subdomain||'')+'.hack5.net')+'</span></div>';
     return '<div class="panel tenant-hero">'
       + banner
       + (tn.intro?'<p style="font-size:16px;color:var(--ink2);white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
@@ -2470,7 +2496,7 @@ const APP_HTML = String.raw`<!doctype html>
     app.innerHTML = '<h1>'+t('首页设置','Homepage settings')+'</h1>'
       + '<div class="panel" style="max-width:640px">'
       + '<label>'+t('介绍','Intro')+'</label><textarea id="fIntro" maxlength="2000" rows="4" placeholder="'+t('这个黑客松是关于…','What this hackathon is about…')+'">'+esc(tn.intro||'')+'</textarea>'
-      + '<label>'+t('首页 Banner','Homepage banner')+' <span class="muted">'+t('(宽图,自动裁 16:9 内并压 ≤120KB)','(wide, auto-cropped & ≤120KB)')+'</span></label>'
+      + '<label>'+t('首页 Banner','Homepage banner')+' <span class="muted">'+t('(宽幅,自动裁 ~2.9:1 并压 ≤120KB;不设则用默认款)','(wide ~2.9:1, ≤120KB; a default is used if unset)')+'</span></label>'
       + '<div id="fBannerPrev">'+(tn.hasBanner?'<img src="/banner/'+esc(tn.subdomain||'')+'?t='+Date.now()+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;border:1px solid var(--line);display:block;margin-bottom:8px">':'')+'</div>'
       + '<input id="fBanner" type="file" accept="image/*"><span id="fBannerMsg" class="muted"></span>'
       + '<label>'+t('时间','Time')+'</label><input id="fTime" maxlength="120" value="'+esc(tn.eventTime||'')+'" placeholder="'+t('例:2026-08-15 ~ 08-17','e.g. Aug 15-17, 2026')+'">'
