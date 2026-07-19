@@ -465,12 +465,36 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   }
 
   const root = env.ROOT_DOMAIN || "hack5.net";
-  return json({
-    ok: true,
-    subdomain,
-    name,
-    url: `https://${subdomain}.${root}`,
-    adminPassword: adminPass,
+  const url = `https://${subdomain}.${root}`;
+  // Also email the creator their site link + admin password as a backup (non-fatal).
+  await sendHackathonReadyEmail(env, user.email, name, url, adminPass).catch(() => {});
+  return json({ ok: true, subdomain, name, url, adminPassword: adminPass });
+}
+
+async function sendHackathonReadyEmail(env: Env, email: string, name: string, url: string, adminPass: string): Promise<void> {
+  if (!env.RESEND_API_KEY) return;
+  const text = `你的黑客松「${name}」已就绪!\n站点:${url}\n管理员密码:${adminPass}(请妥善保存)\n\n用管理员密码在站点登录即可管理:生成邀请码/评委码、编辑首页、上传照片、评审打分。\n\nYour hackathon "${name}" is live: ${url}\nAdmin password: ${adminPass}\n\n— hack5.net`;
+  const html =
+    `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
+    `<table role="presentation" width="460" cellpadding="0" cellspacing="0" style="max-width:460px;width:100%">` +
+    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#0a0e0a;border-radius:11px;color:#25ff86;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14161c;vertical-align:middle;padding-left:10px">hack5</span></td></tr>` +
+    `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
+    `<h1 style="font-size:20px;margin:0 0 6px;color:#14161c">${escapeHtml(name)} ` + `<span style="color:#0f9d6b">✓</span></h1>` +
+    `<p style="color:#5f6675;font-size:15px;margin:0 0 16px">你的黑客松已就绪 · Your hackathon is live</p>` +
+    `<p style="margin:0 0 6px;color:#5f6675;font-size:14px">站点 · Site</p>` +
+    `<p style="margin:0 0 16px"><a href="${url}" style="font-size:16px;font-weight:700;color:#5b4be6">${url}</a></p>` +
+    `<p style="margin:0 0 6px;color:#5f6675;font-size:14px">管理员密码 · Admin password</p>` +
+    `<div style="font-size:20px;font-weight:800;letter-spacing:1px;color:#14161c;background:#f2f0fe;border-radius:8px;padding:12px 14px;font-family:ui-monospace,Menlo,monospace">${escapeHtml(adminPass)}</div>` +
+    `<p style="color:#7a8090;font-size:13px;line-height:1.6;margin:14px 0 0">用这个密码登录站点即可管理:生成邀请码/评委码、编辑首页、上传照片、评审。请妥善保存。<br>Log in with this password to manage your event. Keep it safe.</p>` +
+    `</td></tr>` +
+    `<tr><td align="center" style="padding:18px 0 8px"><a href="${url}" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:9px">🚀 进入你的黑客松 →</a></td></tr>` +
+    `<tr><td align="center" style="color:#9aa1ac;font-size:12px;line-height:1.7;padding-top:14px">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks</td></tr>` +
+    `</table></td></tr></table></div>`;
+  await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 你的黑客松「${name}」已就绪`, text, html }),
   });
 }
 
@@ -1317,6 +1341,10 @@ async function sha256Hex(data: string): Promise<string> {
 // Peppered hash for per-tenant admin passwords (AUTH_SECRET is the pepper).
 async function hashSecret(env: Env, value: string): Promise<string> {
   return sha256Hex(`${env.AUTH_SECRET}:${value}`);
+}
+
+function escapeHtml(value: string): string {
+  return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 }
 
 function timingSafeEqual(a: string, b: string): boolean {
