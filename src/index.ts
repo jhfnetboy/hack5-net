@@ -1801,7 +1801,7 @@ const APP_HTML = String.raw`<!doctype html>
   <meta name="twitter:description" content="报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
   <meta name="twitter:image" content="https://hack5.net/og.png">
   <style>
-    :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--card:#fff;--ink:#14161c;--ink2:var(--ink2);--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10);--ghost-bg:#fff;--ghost-hover:#eef1f6;--input-bg:#fff;--header-bg:rgba(255,255,255,.9);--info-bg:#eef4ff;--info-ink:#25408f;--ok-bg:#e9f8f1;--err-bg:#fdeeec}
+    :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--card:#fff;--ink:#14161c;--ink2:#3c4250;--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10);--ghost-bg:#fff;--ghost-hover:#eef1f6;--input-bg:#fff;--header-bg:rgba(255,255,255,.9);--info-bg:#eef4ff;--info-ink:#25408f;--ok-bg:#e9f8f1;--err-bg:#fdeeec}
     :root[data-theme="dark"]{color-scheme:dark;--bg:#0d1017;--panel:#161b24;--card:#161b24;--ink:#e7eaf0;--ink2:#aeb6c4;--muted:#8b94a3;--line:#28303c;--brand:#8b7bff;--brand-dark:#7a68ff;--ok:#3fca8f;--danger:#ff6b5b;--shadow:0 14px 44px rgba(0,0,0,.45);--ghost-bg:#1b212b;--ghost-hover:#232b37;--input-bg:#11161e;--header-bg:rgba(13,16,23,.9);--info-bg:#16233f;--info-ink:#9db8ff;--ok-bg:#123026;--err-bg:#33191a}
     *{box-sizing:border-box}
     body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
