@@ -28,6 +28,23 @@ After the admin logs in, two extra pages appear — **邀请码** (batch-generat
 
 ---
 
+## 开赛前必做:先生成码 / Before you open: generate the codes
+
+> ⚠️ **数据库初始是空的。码不是每次提交时动态产生的,而是你预先批量生成、手动分发的。不先生成,选手交不了、评委进不去。**
+> The DB starts empty. Codes are **pre-generated in batches by you and handed out**, not auto-created per submission. Without them, no team can submit and no judge can log in.
+
+1. **登录管理后台**:打开 `/judge`,填管理口令 `ADMIN_PASSCODE`。登录后导航才会出现「邀请码」「评委」两页。
+   Log in at `/judge` with the admin passcode; the **邀请码** and **评委** pages then appear in the nav.
+2. **生成 + 查看邀请码**:进「邀请码」页(`/invites`)→ 填数量(如 100)→ 点生成 → 「复制全部未使用」→ 一队发一个。
+   **这一页就是你查看邀请码的地方** —— 它列出所有码,并标注每个是"未使用"还是已被哪次提交用掉(单次有效)。
+   Go to **邀请码** (`/invites`): enter a count → Generate → "复制全部未使用". **This page is where you view all codes** and their used/unused status.
+3. **生成评委码**:进「评委」页(`/judges`)→ 输入评委名单(每行一个)→ 生成 → 复制,一人一个。码绑定姓名,可重复登录、改分。
+   Go to **评委** (`/judges`): paste a name list (one per line) → Generate. Each code is bound to a name; judges can re-login and edit scores.
+
+分发方式随意(微信/邮件/纸条),系统不发通知。You distribute the codes yourself (WeChat/email/etc.); the system sends no notifications.
+
+---
+
 ## 选手怎么交 / How teams submit
 
 一个作品 = **产品名称** + **GitHub 仓库(必须 Public)** + **演示视频链接** + **1–4 张产品截图** + 每队专属**邀请码**。
