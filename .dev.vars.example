@@ -14,3 +14,4 @@ GITHUB_TOKEN=
 # Only needed if you later enable direct R2 video upload (VIDEO_UPLOAD=on):
 # R2_ACCESS_KEY_ID=
 # R2_SECRET_ACCESS_KEY=
+OPENAI_API_KEY="sk-..."

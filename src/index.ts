@@ -28,6 +28,7 @@ interface Env {
   R2_BUCKET_NAME?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
+  OPENAI_API_KEY?: string; // premium: AI text-to-image poster (gpt-image-1)
   SIGNED_UPLOAD_EXPIRES_SECONDS?: string;
 }
 
@@ -80,6 +81,9 @@ export default {
       if (path === "/api/tenant/register" && method === "POST") return registerParticipant(request, env, tenant);
       if (path === "/api/tenant/registrations" && method === "GET") return listRegistrations(request, env, tid);
       if (path === "/api/tenant/registrations/export" && method === "GET") return exportRegistrations(request, env, tid);
+
+      // ---- premium: AI text-to-image poster background (admin, metered) ----
+      if (path === "/api/tenant/poster/ai" && method === "POST") return generateAiPoster(request, env, tenant, tid);
 
       // ---- photo wall ----
       if (path === "/api/tenant/photos" && method === "GET") return listPhotos(env, tid);
@@ -700,6 +704,58 @@ async function exportRegistrations(request: Request, env: Env, tid: string | nul
       "Cache-Control": "no-store",
     },
   });
+}
+
+// Premium: generate an AI poster BACKGROUND from a text prompt (gpt-image-1), overlaid with crisp
+// event text on the client. Admin-only (it costs money) and metered per tenant per day.
+const AI_POSTER_DAILY_CAP = 10;
+async function generateAiPoster(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  const auth = await requireRole(request, env, tid, "admin");
+  if (!auth || !tenant) return json({ error: "Admin only" }, 403);
+  if (!env.OPENAI_API_KEY) return json({ error: "AI 海报未开通 / AI poster not enabled" }, 503);
+
+  const body = await request.json<{ prompt?: string }>().catch(() => null);
+  const style = String(body?.prompt ?? "").trim().slice(0, 500);
+  if (!style) return json({ error: "请描述画风 / Describe the style" }, 400);
+
+  // Daily cost cap per tenant.
+  const day = Math.floor(unixNow() / 86400);
+  const capKey = `aiposter:${tenant.id}:${day}`;
+  const used = Number((await env.SHOTS.get(capKey)) ?? "0");
+  if (used >= AI_POSTER_DAILY_CAP) return json({ error: "今日 AI 海报额度已用完 / Daily AI quota reached" }, 429);
+
+  const name = (tenant.name ?? "Hackathon").slice(0, 80);
+  const intro = (tenant.intro ?? "").replace(/\s+/g, " ").slice(0, 160);
+  const prompt =
+    `Poster BACKGROUND artwork for a hackathon called "${name}".` +
+    (intro ? ` Event theme: ${intro}.` : "") +
+    ` Art direction from the organizer: ${style}.` +
+    ` Vertical A4 portrait composition, cinematic, high detail, vivid, professional event-poster quality.` +
+    ` IMPORTANT: render NO text, NO letters, NO words, NO numbers and NO logos anywhere in the image;` +
+    ` keep the lower third calmer and slightly darker so text can be overlaid on top.`;
+
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-image-1", prompt, size: "1024x1536", quality: "medium", n: 1 }),
+    });
+  } catch {
+    return json({ error: "AI 服务暂不可用 / AI service unavailable" }, 502);
+  }
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    console.log("gpt-image-1 error", resp.status, detail.slice(0, 300));
+    return json({ error: "生成失败,请稍后再试 / Generation failed" }, 502);
+  }
+  const data = await resp.json<{ data?: { b64_json?: string }[] }>().catch(() => null);
+  const b64 = data?.data?.[0]?.b64_json;
+  if (!b64) return json({ error: "生成失败 / Generation failed" }, 502);
+
+  // Charge one credit only on success; TTL cleans up old day buckets.
+  await env.SHOTS.put(capKey, String(used + 1), { expirationTtl: 2 * 86400 });
+  return json({ image: `data:image/png;base64,${b64}`, remaining: AI_POSTER_DAILY_CAP - used - 1 });
 }
 
 // ============================ photo wall ============================
@@ -2124,7 +2180,7 @@ const APP_HTML = String.raw`<!doctype html>
     } else { for(let i=0;i<str.length && lines.length<maxLines;i+=per) lines.push(str.slice(i,i+per)); }
     return lines;
   }
-  function posterSvg(){
+  function posterSvg(bg){
     const tn = CONFIG.tenant || {};
     const name = tn.name || 'Hackathon';
     const nameLines = wrapText(name, name.length>16?14:10, 3);
@@ -2133,8 +2189,11 @@ const APP_HTML = String.raw`<!doctype html>
     const bits=[]; if(tn.eventTime)bits.push(['📅',tn.eventTime]); if(tn.location)bits.push(['📍',tn.location]); if(tn.address)bits.push(['📮',tn.address]);
     const sub = tn.subdomain||'';
     let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 794 1123" width="100%" style="display:block">'
+      + '<defs><linearGradient id="scrim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0a0e0a" stop-opacity="0.72"/><stop offset="0.42" stop-color="#0a0e0a" stop-opacity="0.26"/><stop offset="0.66" stop-color="#0a0e0a" stop-opacity="0.5"/><stop offset="1" stop-color="#0a0e0a" stop-opacity="0.92"/></linearGradient></defs>'
       + '<rect width="794" height="1123" fill="#0a0e0a"/>'
-      + '<g fill="#25ff86" opacity="0.06" font-family="monospace" font-size="16">'+[0,60,120,680,740].map(x=>'<text x="'+x+'"><tspan x="'+x+'" dy="22">1010</tspan><tspan x="'+x+'" dy="22">0110</tspan><tspan x="'+x+'" dy="22">1101</tspan><tspan x="'+x+'" dy="22">0011</tspan></text>').join('')+'</g>'
+      + (bg
+          ? '<image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#scrim)"/>'
+          : '<g fill="#25ff86" opacity="0.06" font-family="monospace" font-size="16">'+[0,60,120,680,740].map(x=>'<text x="'+x+'"><tspan x="'+x+'" dy="22">1010</tspan><tspan x="'+x+'" dy="22">0110</tspan><tspan x="'+x+'" dy="22">1101</tspan><tspan x="'+x+'" dy="22">0011</tspan></text>').join('')+'</g>')
       + '<g transform="translate(60,72)"><rect width="56" height="56" rx="14" fill="#141a16"/><text x="28" y="38" text-anchor="middle" font-family="ui-monospace,monospace" font-size="24" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text></g>'
       + '<text x="132" y="110" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">hack5</text>'
       + '<text x="734" y="106" text-anchor="end" font-family="monospace" font-size="15" fill="#25ff86" letter-spacing="3">HACKATHON</text>'
@@ -2152,13 +2211,36 @@ const APP_HTML = String.raw`<!doctype html>
       + '</svg>';
     return svg;
   }
+  function paint(bg){ const svg=posterSvg(bg); window.__posterSvg=svg; window.__posterBg=bg||''; $('#posterBox').innerHTML=svg; }
   function renderPoster(){
     if(!CONFIG.tenant){ go('/'); return; }
-    const svg = posterSvg(); window.__posterSvg = svg;
+    const isAdmin = ME.role==='admin';
+    const aiPanel = isAdmin
+      ? '<div class="panel" style="max-width:640px;margin-bottom:16px">'
+        + '<div class="row" style="justify-content:space-between;align-items:center"><b>'+t('AI 海报(付费)','AI poster (premium)')+'</b><span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--brand);border:1px solid var(--line);border-radius:20px;padding:2px 10px">gpt-image-1</span></div>'
+        + '<p class="muted" style="margin:6px 0 10px">'+t('用一句话描述你想要的画风,AI 生成背景画面,活动信息文字仍清晰叠加在上面。','Describe the art style you want; AI paints the background and your event text stays crisply overlaid.')+'</p>'
+        + '<textarea id="aiPrompt" rows="2" maxlength="500" placeholder="'+t('例:赛博朋克夜景城市,霓虹紫青配色,未来感','e.g. cyberpunk night city, neon purple-teal, futuristic')+'"></textarea>'
+        + '<div class="row" style="margin-top:10px;gap:8px"><button id="aiGen">'+t('生成 AI 海报','Generate')+'</button><button class="ghost" id="aiClear">'+t('恢复免费版','Reset to free')+'</button><span id="aiMsg" class="muted"></span></div>'
+        + '</div>'
+      : '';
     app.innerHTML = '<div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap"><h1>'+t('宣传海报','Promo poster')+'</h1>'
       + '<div class="row"><button id="dlPng">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg">'+t('下载 SVG','Download SVG')+'</button></div></div>'
-      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。想要文字描述定制画风的 AI 海报?付费版即将上线。','A4 portrait, auto-built from your homepage info. Want an AI art-style poster from a text prompt? Premium version coming soon.')+'</p>'
-      + '<div style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)">'+svg+'</div>';
+      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。','A4 portrait, auto-built from your homepage info (name/time/place).')+'</p>'
+      + aiPanel
+      + '<div id="posterBox" style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>';
+    paint('');
+    if(isAdmin){
+      $('#aiGen').addEventListener('click', async ()=>{
+        const prompt=$('#aiPrompt').value.trim();
+        if(!prompt){ setMsg('aiMsg', t('先描述画风','Describe a style first'), true); return; }
+        $('#aiGen').disabled=true; setMsg('aiMsg', t('生成中,约 15-30 秒…','Generating, ~15-30s…'));
+        try{ const r=await api('/api/tenant/poster/ai',{method:'POST',body:{prompt}});
+          paint(r.image); setMsg('aiMsg', t('完成 ✓ 今日剩余 ','Done ✓ remaining today ')+r.remaining);
+        }catch(e){ setMsg('aiMsg', e.message, true); }
+        $('#aiGen').disabled=false;
+      });
+      $('#aiClear').addEventListener('click', ()=>{ paint(''); setMsg('aiMsg',''); });
+    }
     $('#dlSvg').addEventListener('click', ()=>{ const b=new Blob([window.__posterSvg],{type:'image/svg+xml'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download='hack5-poster.svg'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); });
     $('#dlPng').addEventListener('click', ()=>{
       const img=new Image(); const url=URL.createObjectURL(new Blob([window.__posterSvg],{type:'image/svg+xml;charset=utf-8'}));
