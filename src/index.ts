@@ -922,7 +922,7 @@ async function listSubmissions(env: Env, tid: string | null): Promise<Response> 
 async function getSubmission(request: Request, env: Env, tid: string | null, id: string): Promise<Response> {
   if (!tid) return json({ error: "Not found" }, 404);
   const row = await env.DB.prepare(
-    "SELECT id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
+    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
   )
     .bind(id, tid)
     .first<Record<string, unknown>>();
@@ -939,6 +939,7 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean)
     id,
     projectName: row.project_name || row.team_name || "未命名作品",
     teamName: row.team_name ?? "",
+    email: includeContact ? (row.email ?? null) : null,
     contact: includeContact ? (row.contact ?? null) : null,
     repoOwner: row.repo_owner,
     repoName: row.repo_name,
@@ -959,6 +960,7 @@ async function createSubmission(request: Request, env: Env, tid: string | null):
       passcode?: string;
       projectName?: string;
       teamName?: string;
+      email?: string;
       contact?: string;
       repoUrl?: string;
       description?: string;
@@ -972,6 +974,7 @@ async function createSubmission(request: Request, env: Env, tid: string | null):
   const inviteCode = String(body.passcode ?? "").trim();
   const projectName = String(body.projectName ?? "").trim().slice(0, 80);
   const teamName = String(body.teamName ?? "").trim().slice(0, 80);
+  const email = normalizeEmail(body.email);
   const contact = String(body.contact ?? "").trim().slice(0, 120) || null;
   const description = String(body.description ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
   const videoUrl = String(body.videoUrl ?? "").trim();
@@ -980,6 +983,7 @@ async function createSubmission(request: Request, env: Env, tid: string | null):
   const maxShotBytes = numberEnv(env.MAX_SHOT_BYTES, DEFAULT_MAX_SHOT_BYTES);
 
   if (!projectName) return json({ error: "请填写产品名称 / Product name required" }, 400);
+  if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
   if (!repo) return json({ error: "GitHub 仓库链接无效 / Invalid GitHub repo URL" }, 400);
   if (!isHttpUrl(videoUrl) || videoUrl.length > 500) {
     return json({ error: "请填写有效的视频链接(B站/YouTube)/ Valid video link required" }, 400);
@@ -1029,9 +1033,9 @@ async function createSubmission(request: Request, env: Env, tid: string | null):
     await clearShots(env, existing.id, existing.shot_count);
     await putShots(env, existing.id, decoded);
     await env.DB.prepare(
-      "UPDATE submissions SET project_name = ?, team_name = ?, contact = ?, repo_url = ?, description = ?, video_url = ?, shot_count = ?, shots_meta = ?, updated_at = ? WHERE id = ?",
+      "UPDATE submissions SET project_name = ?, team_name = ?, email = ?, contact = ?, repo_url = ?, description = ?, video_url = ?, shot_count = ?, shots_meta = ?, updated_at = ? WHERE id = ?",
     )
-      .bind(projectName, teamName, contact, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, now, existing.id)
+      .bind(projectName, teamName, email, contact, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, now, existing.id)
       .run();
     return json({ ok: true, id: existing.id, editToken: existing.edit_token, viewUrl: `/p/${existing.id}`, updated: true });
   }
@@ -1056,9 +1060,9 @@ async function createSubmission(request: Request, env: Env, tid: string | null):
   try {
     await putShots(env, id, decoded);
     await env.DB.prepare(
-      "INSERT INTO submissions (id, tenant_id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
+      "INSERT INTO submissions (id, tenant_id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
     )
-      .bind(id, tid, projectName, teamName, contact, repo.owner, repo.repo, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, shareToken, editToken, now, now)
+      .bind(id, tid, projectName, teamName, email, contact, repo.owner, repo.repo, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, shareToken, editToken, now, now)
       .run();
   } catch (error) {
     // Roll back so a failed create (e.g. a repo-uniqueness race) doesn't burn the
@@ -1281,7 +1285,7 @@ async function exportScores(request: Request, env: Env, tid: string | null): Pro
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
   const rows = await env.DB.prepare(
-    `SELECT s.project_name, s.team_name, s.repo_owner, s.repo_name, sc.judge_name,
+    `SELECT s.project_name, s.team_name, s.email, s.contact, s.repo_owner, s.repo_name, sc.judge_name,
        sc.innovation, sc.technical, sc.completeness, sc.presentation,
        (sc.innovation + sc.technical + sc.completeness + sc.presentation) AS total, sc.comment
      FROM scores sc JOIN submissions s ON s.id = sc.submission_id
@@ -1290,13 +1294,15 @@ async function exportScores(request: Request, env: Env, tid: string | null): Pro
   )
     .bind(tid)
     .all<Record<string, unknown>>();
-  const header = ["product", "team", "repo", "judge", "innovation", "technical", "completeness", "presentation", "total", "comment"];
+  const header = ["product", "team", "email", "contact", "repo", "judge", "innovation", "technical", "completeness", "presentation", "total", "comment"];
   const lines = [header.join(",")];
   for (const r of rows.results) {
     lines.push(
       [
         r.project_name,
         r.team_name,
+        r.email ?? "",
+        r.contact ?? "",
         `${r.repo_owner}/${r.repo_name}`,
         r.judge_name,
         r.innovation,
@@ -2558,6 +2564,8 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="kv"><span>'+t('仓库','Repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
       + '<div id="ghMeta"></div>'
       + (s.lockedSha?'<div class="kv"><span>'+t('评审版本','Reviewed')+'</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
+      + (s.email?'<div class="kv"><span>'+t('邮箱','Email')+'</span><b><a href="mailto:'+esc(s.email)+'">'+esc(s.email)+'</a ></b></div>':'')
+      + (s.contact?'<div class="kv"><span>'+t('联系','Contact')+'</span><b>'+esc(s.contact)+'</b></div>':'')
       + '</div>'
       + '<div id="scorePanel"></div>'
       + '<div id="adminPanel"></div>'
@@ -2654,7 +2662,8 @@ const APP_HTML = String.raw`<!doctype html>
       + '<label>'+t('演示视频链接','Demo video link')+' * <span class="muted">'+t('(B站 / YouTube)','(Bilibili / YouTube)')+'</span></label><input id="videoUrl" placeholder="https://www.bilibili.com/video/BV...">'
       + '<label>'+t('一句话介绍','One-line intro')+' <span class="muted">(≤300)</span></label><textarea id="description" maxlength="300" placeholder="'+t('项目亮点 / 技术栈','Highlights / tech stack')+'"></textarea>'
       + '<label>'+t('队伍名称','Team name')+' <span class="muted">('+t('可选','optional')+')</span></label><input id="teamName" maxlength="80" placeholder="'+t('队名','Team')+'">'
-      + '<label>'+t('联系方式','Contact')+' <span class="muted">('+t('可选,评委联系用','optional, for judges')+')</span></label><input id="contact" maxlength="120" placeholder="'+t('微信 / 邮箱','WeChat / email')+'">'
+      + '<label>'+t('邮箱','Email')+' * <span class="muted">('+t('仅主办方/评委可见,用于联系你','organizer/judges only, to reach you')+')</span></label><input id="email" type="email" maxlength="254" placeholder="you@example.com">'
+      + '<label>'+t('其他联系方式','Other contact')+' <span class="muted">('+t('可选,如微信','optional, e.g. WeChat')+')</span></label><input id="contact" maxlength="120" placeholder="'+t('微信 / Telegram …','WeChat / Telegram …')+'">'
       + '<label>'+t('产品截图','Screenshots')+' * <span class="muted">('+CONFIG.minShots+'–'+CONFIG.maxShots+' '+t('张,自动裁切为 16:9,单张≤','imgs, auto-cropped to 16:9, each ≤')+mb+'MB)</span></label>'
       + '<input id="shotFiles" type="file" accept="image/*" multiple>'
       + '<div class="thumbs" id="thumbs"></div>'
@@ -2715,6 +2724,7 @@ const APP_HTML = String.raw`<!doctype html>
       passcode: $('#passcode').value.trim(),
       projectName: $('#projectName').value.trim(),
       teamName: $('#teamName').value.trim(),
+      email: $('#email').value.trim(),
       contact: $('#contact').value.trim(),
       repoUrl: $('#repoUrl').value.trim(),
       description: $('#description').value.trim(),
@@ -2722,6 +2732,7 @@ const APP_HTML = String.raw`<!doctype html>
       shots: SHOTS,
     };
     if(!body.projectName || !body.repoUrl || !body.videoUrl){ setMsg('submitMsg',t('请填齐产品名、仓库、视频链接','Fill in product name, repo and video link'),true); return; }
+    if(!body.email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)){ setMsg('submitMsg',t('请填写有效邮箱','Enter a valid email'),true); return; }
     if(!body.passcode){ setMsg('submitMsg',t('请填写邀请码','Enter your invite code'),true); return; }
     if(SHOTS.length < CONFIG.minShots){ setMsg('submitMsg',t('请至少上传 ','At least ')+CONFIG.minShots+t(' 张截图',' screenshots required'),true); return; }
     $('#submitBtn').disabled = true; setMsg('submitMsg',t('提交中…','Submitting…'));
@@ -2729,7 +2740,7 @@ const APP_HTML = String.raw`<!doctype html>
       const r = await api('/api/submissions',{method:'POST',body});
       setMsg('submitMsg',t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看作品','View project')+'</a ><br>'+t('编辑令牌(改稿用,请保存):','Edit token (save it to edit later): ')+'<code>'+esc(r.editToken)+'</code>', false, true);
       SHOTS = []; renderThumbs();
-      ['#projectName','#repoUrl','#videoUrl','#description','#teamName','#contact','#passcode'].forEach(id=>{ const el = $(id); if(el) el.value = ''; });
+      ['#projectName','#repoUrl','#videoUrl','#description','#teamName','#email','#contact','#passcode'].forEach(id=>{ const el = $(id); if(el) el.value = ''; });
     } catch(e){ setMsg('submitMsg', e.message, true); }
     finally { $('#submitBtn').disabled = false; }
   }
