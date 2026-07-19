@@ -1801,7 +1801,8 @@ const APP_HTML = String.raw`<!doctype html>
   <meta name="twitter:description" content="报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
   <meta name="twitter:image" content="https://hack5.net/og.png">
   <style>
-    :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--ink:#14161c;--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10)}
+    :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--card:#fff;--ink:#14161c;--ink2:var(--ink2);--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10);--ghost-bg:#fff;--ghost-hover:#eef1f6;--input-bg:#fff;--header-bg:rgba(255,255,255,.9);--info-bg:#eef4ff;--info-ink:#25408f;--ok-bg:#e9f8f1;--err-bg:#fdeeec}
+    :root[data-theme="dark"]{color-scheme:dark;--bg:#0d1017;--panel:#161b24;--card:#161b24;--ink:#e7eaf0;--ink2:#aeb6c4;--muted:#8b94a3;--line:#28303c;--brand:#8b7bff;--brand-dark:#7a68ff;--ok:#3fca8f;--danger:#ff6b5b;--shadow:0 14px 44px rgba(0,0,0,.45);--ghost-bg:#1b212b;--ghost-hover:#232b37;--input-bg:#11161e;--header-bg:rgba(13,16,23,.9);--info-bg:#16233f;--info-ink:#9db8ff;--ok-bg:#123026;--err-bg:#33191a}
     *{box-sizing:border-box}
     body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
     a{color:var(--brand);text-decoration:none}
@@ -1809,9 +1810,9 @@ const APP_HTML = String.raw`<!doctype html>
     button{border:0;background:var(--brand);color:#fff;border-radius:8px;padding:9px 15px;cursor:pointer;font-weight:650}
     button:hover{background:var(--brand-dark)}
     button:disabled{opacity:.5;cursor:not-allowed}
-    .ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
-    .ghost:hover{background:#eef1f6}
-    header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:rgba(255,255,255,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+    .ghost{background:var(--ghost-bg);color:var(--ink);border:1px solid var(--line)}
+    .ghost:hover{background:var(--ghost-hover)}
+    header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
     .brand{display:flex;align-items:center;gap:10px;font-weight:800;cursor:pointer}
     .mark{width:30px;height:30px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
     nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -1821,17 +1822,17 @@ const APP_HTML = String.raw`<!doctype html>
     h2{font-size:20px;margin:0 0 12px}
     p{color:var(--muted);line-height:1.6}
     label{display:block;font-size:13px;font-weight:700;margin:14px 0 6px}
-    input,textarea,select{width:100%;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fff;color:var(--ink);outline:none}
+    input,textarea,select{width:100%;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--input-bg);color:var(--ink);outline:none}
     textarea{min-height:84px;resize:vertical}
     input:focus,textarea:focus,select:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(91,75,230,.14)}
     .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:var(--shadow)}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     .muted{color:var(--muted);font-size:13px}
-    .notice{margin-top:14px;padding:11px 13px;border-radius:8px;background:#eef4ff;color:#25408f;word-break:break-word}
-    .notice.err{background:#fdeeec;color:var(--danger)}
-    .notice.ok{background:#e9f8f1;color:var(--ok)}
+    .notice{margin-top:14px;padding:11px 13px;border-radius:8px;background:var(--info-bg);color:var(--info-ink);word-break:break-word}
+    .notice.err{background:var(--err-bg);color:var(--danger)}
+    .notice.ok{background:var(--ok-bg);color:var(--ok)}
     .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
-    .card{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column}
     .carousel{position:relative;aspect-ratio:16/9;background:#0b0d12;overflow:hidden;cursor:pointer}
     .carousel img{width:100%;height:100%;object-fit:cover;display:none}
     .carousel img.on{display:block}
@@ -1845,7 +1846,7 @@ const APP_HTML = String.raw`<!doctype html>
     .card-body{padding:13px;display:flex;flex-direction:column;gap:8px;cursor:pointer;flex:1}
     .card-title{font-weight:750;line-height:1.35;color:var(--ink)}
     .card-repo{font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
-    .card-desc{font-size:13px;color:#3c4250;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .card-desc{font-size:13px;color:var(--ink2);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .card-meta{display:flex;gap:12px;font-size:12px;color:var(--muted);margin-top:auto;flex-wrap:wrap}
     .chip{display:inline-flex;gap:4px;align-items:center}
     .detail-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:20px;align-items:start}
@@ -1883,45 +1884,45 @@ const APP_HTML = String.raw`<!doctype html>
     .guide-row .guide-art{background:linear-gradient(135deg,#f3f1fe,#eaf0ff);border-radius:12px;padding:16px}
     .guide-row.rev .guide-art{order:2}
     .guide-row h2{font-size:23px;margin:0 0 10px}
-    .guide-row p{font-size:15px;line-height:1.75;color:#3c4250;margin:0}
+    .guide-row p{font-size:15px;line-height:1.75;color:var(--ink2);margin:0}
     .guide-steps{display:grid;gap:14px;margin:22px 0}
     .step{display:flex;gap:16px;align-items:flex-start;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
     .step .num{flex:0 0 auto;width:40px;height:40px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;font-weight:800;font-size:18px}
     .step h3{margin:0 0 5px;font-size:17px}
-    .step p{margin:0;color:#3c4250;line-height:1.6;font-size:14px}
+    .step p{margin:0;color:var(--ink2);line-height:1.6;font-size:14px}
     .guide-cta{text-align:center;margin:34px 0;padding:32px;background:linear-gradient(135deg,var(--brand),#7a6bf0);border-radius:16px;color:#fff}
     .guide-cta h2{color:#fff;margin:0 0 14px}
     .guide-cta button{background:#fff;color:var(--brand)}
     @media(max-width:720px){.guide-row{grid-template-columns:1fr}.guide-row.rev .guide-art{order:0}}
     .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
-    .org-foot{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:12px;font-size:14px;color:#3c4250;font-weight:600}
+    .org-foot{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:12px;font-size:14px;color:var(--ink2);font-weight:600}
     .org-foot-logo{width:28px;height:28px;object-fit:contain;border-radius:6px}
     .orglogo-prev{width:64px;height:64px;border:1px solid var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:repeating-conic-gradient(#f0f2f1 0% 25%,#fff 0% 50%) 50%/16px 16px}
     .orglogo-prev img{max-width:100%;max-height:100%;object-fit:contain}
     .tenant-hero{margin-bottom:18px}
-    .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:#3c4250;font-size:14px;font-weight:600}
+    .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:var(--ink2);font-size:14px;font-weight:600}
     .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
     .map-links{margin-top:10px;font-size:13px;color:var(--muted)}
     .map-links a{font-weight:650}
     .agenda{margin-top:16px}
-    .agenda .ag-h{font-weight:700;font-size:14px;color:#3c4250;margin-bottom:8px}
+    .agenda .ag-h{font-weight:700;font-size:14px;color:var(--ink2);margin-bottom:8px}
     .ag-item{display:flex;gap:14px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:14px}
     .ag-item:last-child{border-bottom:0}
     .ag-t{flex:0 0 140px;color:var(--brand);font-weight:650;font-family:ui-monospace,Menlo,monospace;font-size:13px}
-    .ag-x{color:#3c4250}
+    .ag-x{color:var(--ink2)}
     @media(max-width:560px){.ag-item{flex-direction:column;gap:2px}.ag-t{flex:none}}
     .teamgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
-    .tcard{position:relative;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:#fff;box-shadow:var(--shadow)}
+    .tcard{position:relative;border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--card);box-shadow:var(--shadow)}
     .tcard .tname{font-weight:800;font-size:16px;margin-bottom:8px}
-    .tcard .trow{font-size:14px;color:#3c4250;margin:3px 0}
+    .tcard .trow{font-size:14px;color:var(--ink2);margin:3px 0}
     .tcard .tk{display:inline-block;min-width:30px;margin-right:8px;padding:1px 8px;border-radius:20px;background:#eef6f1;color:var(--brand);font-size:12px;font-weight:700}
-    .tcard .tidea{font-size:14px;color:#3c4250;margin:8px 0;white-space:pre-wrap}
+    .tcard .tidea{font-size:14px;color:var(--ink2);margin:8px 0;white-space:pre-wrap}
     .tcard .tcontact{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);font-size:13px;color:var(--brand);font-weight:650;word-break:break-all}
     .tcard .tmdel{position:absolute;top:8px;right:10px;width:22px;height:22px;border-radius:50%;background:rgba(192,57,43,.9);color:#fff;text-align:center;line-height:22px;cursor:pointer;font-size:15px}
     .masonry{columns:3 240px;column-gap:14px}
-    .mphoto{position:relative;break-inside:avoid;margin-bottom:14px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:#fff;box-shadow:var(--shadow)}
+    .mphoto{position:relative;break-inside:avoid;margin-bottom:14px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:var(--card);box-shadow:var(--shadow)}
     .mphoto img{width:100%;display:block;cursor:pointer}
-    .mphoto .cap{padding:8px 10px;font-size:13px;color:#3c4250}
+    .mphoto .cap{padding:8px 10px;font-size:13px;color:var(--ink2)}
     .mphoto .pdel{position:absolute;top:8px;right:8px;width:24px;height:24px;border-radius:50%;background:rgba(192,57,43,.92);color:#fff;text-align:center;line-height:24px;cursor:pointer;font-size:15px}
   </style>
 </head>
@@ -1950,6 +1951,15 @@ const APP_HTML = String.raw`<!doctype html>
   let LANG = lsGet('hv_lang') === 'en' ? 'en' : 'zh';
   const t = (zh, en) => LANG === 'en' ? en : zh;
   window.toggleLang = () => { LANG = LANG === 'en' ? 'zh' : 'en'; lsSet('hv_lang', LANG); document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN'; renderNav(); route(); };
+
+  function initTheme(){
+    const saved = lsGet('hv_theme');
+    const dark = saved ? saved === 'dark' : !!(window.matchMedia && window.matchMedia('(prefers-color-scheme:dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  }
+  initTheme();
+  window.toggleTheme = () => { const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light'; lsSet('hv_theme', dark ? 'dark' : 'light'); renderNav(); };
+  function themeBtn(){ return '<button class="ghost" onclick="toggleTheme()" title="'+t('深色 / 浅色','Dark / Light')+'">'+(document.documentElement.dataset.theme==='dark'?'☀️':'🌙')+'</button>'; }
 
   function go(path){ history.pushState(null, '', path); route(); }
   window.addEventListener('popstate', route);
@@ -1991,7 +2001,7 @@ const APP_HTML = String.raw`<!doctype html>
       } else {
         hp += '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>';
       }
-      hp += '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
+      hp += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
       n.innerHTML = hp; return;
     }
     let h = '<button class="ghost" onclick="go(\'/\')">'+t('作品墙','Gallery')+'</button>'
@@ -2009,7 +2019,7 @@ const APP_HTML = String.raw`<!doctype html>
     } else {
       h += '<button onclick="go(\'/judge\')">'+t('评审入口','Judge login')+'</button>';
     }
-    h += '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
+    h += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
     n.innerHTML = h;
   }
 
@@ -2145,7 +2155,7 @@ const APP_HTML = String.raw`<!doctype html>
     app.innerHTML = '<div class="guide">'
       + '<div class="guide-hero"><h1>'+t('关于 hack5','About hack5')+'</h1>'
       + '<p class="guide-sub">'+t('人人可办的黑客松平台','a hackathon platform anyone can run')+'</p></div>'
-      + '<div class="panel" style="font-size:16px;line-height:1.8;color:#3c4250">'
+      + '<div class="panel" style="font-size:16px;line-height:1.8;color:var(--ink2)">'
       + t('<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它让任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点:<b>第一场免费</b>、记录永久保留;想办更多场次、或用上动态海报、一键转发、开发者社区 Bot 等高级功能,可订阅付费。',
           '<b>hack5.net</b> is part of <b>Mycelium</b> — a Digital Public Goods organization. Anyone can spin up their own hackathon site in <b>10 minutes</b>: your <b>first event is free</b> with records kept forever; hosting more events or unlocking premium features (dynamic posters, one-click sharing, a developer-community bot) comes with a subscription.')
       + '</div>'
@@ -2178,8 +2188,9 @@ const APP_HTML = String.raw`<!doctype html>
       + '<p class="guide-sub">'+t('10 分钟发起 · 独立域名 · 首场免费','Live in 10 minutes · your own domain · first event free')+'</p>'
       + '<div class="row" style="justify-content:center;margin-top:22px">'
       + '<button onclick="go(\'/start\')" style="font-size:16px;padding:12px 24px">'+t('🚀 发起你的黑客松','🚀 Start your hackathon')+'</button>'
+      + '<a href="https://demo.hack5.net" target="_blank" rel="noopener"><button class="ghost" style="font-size:16px;padding:12px 24px">'+t('👀 看 Demo 示例','👀 See the demo')+'</button></a >'
       + '<button class="ghost" onclick="go(\'/about\')" style="font-size:16px;padding:12px 24px">'+t('了解 hack5','About hack5')+'</button></div>'
-      + '<div style="text-align:center;margin-top:14px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 看一个示例黑客松站点 → demo.hack5.net','👀 See a live example → demo.hack5.net')+'</a></div>'
+      + '<div style="text-align:center;margin-top:14px"><a href="https://demo.hack5.net" target="_blank" rel="noopener" style="color:var(--muted);font-size:14px;font-weight:600">'+t('👀 示例站点 → demo.hack5.net','👀 Live example → demo.hack5.net')+'</a></div>'
       + '</div>'
       + '<div class="guide-steps" style="margin-top:38px">'
       + feats.map(f=>'<div class="step"><div class="num" style="font-size:20px;background:#0a0e0a">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')
@@ -2347,7 +2358,7 @@ const APP_HTML = String.raw`<!doctype html>
       + ag.map(a=>'<div class="ag-item"><span class="ag-t">'+esc(a.time||'')+'</span><span class="ag-x">'+esc(a.title||'')+'</span></div>').join('')+'</div>' : '';
     if(!tn.intro && !bits.length && !tn.address && !map && !agHtml) return '';
     return '<div class="panel tenant-hero">'
-      + (tn.intro?'<p style="font-size:16px;color:#3c4250;white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
+      + (tn.intro?'<p style="font-size:16px;color:var(--ink2);white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
       + (bits.length?'<div class="hero-meta">'+bits.join('')+'</div>':'')
       + (tn.address?'<div class="muted" style="margin-top:6px">📮 '+esc(tn.address)+'</div>':'')
       + map
@@ -2718,7 +2729,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="panel">'
       + '<h2>'+esc(s.projectName)+'</h2>'
       + (s.teamName?'<div class="muted">👥 '+esc(s.teamName)+'</div>':'')
-      + (s.description?'<p style="color:#3c4250">'+esc(s.description)+'</p>':'')
+      + (s.description?'<p style="color:var(--ink2)">'+esc(s.description)+'</p>':'')
       + '<div class="kv"><span>'+t('仓库','Repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
       + '<div id="ghMeta"></div>'
       + (s.lockedSha?'<div class="kv"><span>'+t('评审版本','Reviewed')+'</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
