@@ -5,6 +5,7 @@
   "compatibility_date": "2026-07-18",
   "observability": { "enabled": true },
   "workers_dev": false,
+  "preview_urls": true,
   "routes": [
     { "pattern": "hack5.net", "custom_domain": true },
     { "pattern": "*.hack5.net/*", "zone_name": "hack5.net" }

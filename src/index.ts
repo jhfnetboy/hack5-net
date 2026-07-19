@@ -21,6 +21,8 @@ interface Env {
   CF_DNS_TOKEN?: string; // scoped to the hack5.net zone's DNS — used to auto-create <sub>.hack5.net
   CF_ZONE_ID?: string;
   ROOT_DOMAIN?: string; // e.g. "hack5.net"
+  TURNSTILE_SITEKEY?: string; // public site key (anti-bot on email login)
+  TURNSTILE_SECRET?: string;
   // R2 (only used when VIDEO_UPLOAD=on):
   R2_ACCOUNT_ID?: string;
   R2_BUCKET_NAME?: string;
@@ -183,6 +185,7 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
   return json({
     appName: env.APP_NAME || "hack5",
     country: request.cf?.country ?? null,
+    turnstileSiteKey: env.TURNSTILE_SITEKEY ?? null,
     platform: tctx.platform,
     tenantNotFound: tctx.notFound ?? null,
     tenant: tctx.tenant
@@ -338,9 +341,14 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
 }
 
 async function platformLoginRequest(request: Request, env: Env): Promise<Response> {
-  const body = await request.json<{ email?: string }>().catch(() => null);
+  const body = await request.json<{ email?: string; turnstileToken?: string }>().catch(() => null);
   const email = normalizeEmail(body?.email);
   if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
+  const reqIp = request.headers.get("cf-connecting-ip") ?? "local";
+  // Anti-bot: block automated email-code flooding (only enforced when a secret is configured).
+  if (!(await verifyTurnstile(env, body?.turnstileToken, reqIp))) {
+    return json({ error: "人机验证失败,请重试 / Verification failed" }, 403);
+  }
   const now = unixNow();
   const recent = await env.DB.prepare("SELECT COUNT(*) AS c FROM email_codes WHERE email = ? AND created_at > ?")
     .bind(email, now - 15 * 60)
@@ -365,6 +373,19 @@ async function platformLoginRequest(request: Request, env: Env): Promise<Respons
 function isDevHost(request: Request): boolean {
   const h = new URL(request.url).hostname.toLowerCase();
   return h.endsWith(".workers.dev") || h === "localhost" || h === "127.0.0.1";
+}
+
+// Verify a Cloudflare Turnstile token. Returns true (skip) when no secret is configured.
+async function verifyTurnstile(env: Env, token: string | undefined, ip: string): Promise<boolean> {
+  if (!env.TURNSTILE_SECRET || !env.TURNSTILE_SITEKEY) return true; // off unless fully configured
+  if (!token) return false;
+  const form = new FormData();
+  form.append("secret", env.TURNSTILE_SECRET);
+  form.append("response", token);
+  if (ip && ip !== "local") form.append("remoteip", ip);
+  const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
+  const data = await res.json<{ success?: boolean }>().catch(() => null);
+  return Boolean(data?.success);
 }
 
 async function platformLoginVerify(request: Request, env: Env): Promise<Response> {
@@ -1759,16 +1780,24 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div class="panel" style="max-width:420px;margin:0 auto">'
       + '<label>'+t('邮箱','Email')+'</label><input id="plEmail" type="email" autocomplete="email" placeholder="you@example.com">'
       + '<div id="plCodeArea" class="hidden"><label>'+t('验证码','Code')+'</label><input id="plCode" inputmode="numeric" maxlength="6" placeholder="'+t('6 位验证码','6-digit code')+'"></div>'
+      + (CONFIG.turnstileSiteKey ? '<div id="cfts" style="margin-top:12px"></div>' : '')
       + '<div class="row" style="margin-top:14px"><button id="plSend">'+t('发送验证码','Send code')+'</button><button id="plVerify" class="hidden">'+t('登录','Log in')+'</button></div>'
       + '<div id="plMsg"></div></div></div>';
+    let tsId = null;
+    if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ tsId = window.turnstile.render('#cfts', {sitekey: CONFIG.turnstileSiteKey}); }catch(e){} });
     $('#plSend').addEventListener('click', async ()=>{
       const email = $('#plEmail').value.trim();
+      let turnstileToken;
+      if(CONFIG.turnstileSiteKey){
+        turnstileToken = (window.turnstile && tsId!=null) ? window.turnstile.getResponse(tsId) : '';
+        if(!turnstileToken){ setMsg('plMsg', t('请先完成人机验证','Please complete the check'), true); return; }
+      }
       setMsg('plMsg', t('发送中…','Sending…'));
       try {
-        const r = await api('/api/platform/login/request',{method:'POST',body:{email}});
+        const r = await api('/api/platform/login/request',{method:'POST',body:{email, turnstileToken}});
         $('#plCodeArea').classList.remove('hidden'); $('#plVerify').classList.remove('hidden');
         setMsg('plMsg', t('验证码已发送,请查收邮箱。','Code sent — check your email.')+(r.debugCode?(' [dev: '+r.debugCode+']'):''));
-      } catch(e){ setMsg('plMsg', e.message, true); }
+      } catch(e){ setMsg('plMsg', e.message, true); if(window.turnstile && tsId!=null) try{ window.turnstile.reset(tsId); }catch(_){} }
     });
     $('#plVerify').addEventListener('click', async ()=>{
       try {
@@ -2344,6 +2373,16 @@ const APP_HTML = String.raw`<!doctype html>
     const lb = document.getElementById('lightbox');
     lb.innerHTML = '<img src="'+src+'" alt="">';
     lb.classList.remove('hidden');
+  }
+  function ensureTurnstile(){
+    return new Promise((resolve)=>{
+      if(window.turnstile){ resolve(); return; }
+      let s = document.getElementById('cf-ts-script');
+      if(s){ const iv=setInterval(()=>{ if(window.turnstile){ clearInterval(iv); resolve(); } },100); return; }
+      s = document.createElement('script'); s.id='cf-ts-script';
+      s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'; s.async=true; s.defer=true;
+      s.onload=()=>resolve(); document.head.appendChild(s);
+    });
   }
   function videoEmbed(url){
     let m = url.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]+)/i);
