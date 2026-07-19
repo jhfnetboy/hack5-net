@@ -63,6 +63,9 @@ export default {
       if (path === "/api/platform/logout" && method === "POST") return platformLogout(request);
       if (path === "/api/platform/hackathons" && method === "POST") return createHackathon(request, env);
 
+      // ---- tenant homepage (admin) ----
+      if (path === "/api/tenant/homepage" && method === "POST") return updateHomepage(request, env, tenant);
+
       // ---- submissions (tenant-scoped) ----
       if (path === "/api/submissions" && method === "GET") return listSubmissions(env, tid);
       if (path === "/api/submissions" && method === "POST") return createSubmission(request, env, tid);
@@ -426,6 +429,34 @@ function generateCode(): string {
   const bytes = new Uint8Array(4);
   crypto.getRandomValues(bytes);
   return String(new DataView(bytes.buffer).getUint32(0) % 1_000_000).padStart(6, "0");
+}
+
+// ============================ tenant homepage (admin) ============================
+
+async function updateHomepage(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  const auth = await requireRole(request, env, tenant.id, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const body = await request
+    .json<{ intro?: string; eventTime?: string; location?: string; duration?: string; address?: string; mapQuery?: string }>()
+    .catch(() => null);
+  if (!body) return json({ error: "Invalid JSON" }, 400);
+  const clip = (v: unknown, n: number) => String(v ?? "").trim().slice(0, n) || null;
+  await env.DB.prepare(
+    "UPDATE tenants SET intro = ?, event_time = ?, location = ?, duration = ?, address = ?, map_query = ?, updated_at = ? WHERE id = ?",
+  )
+    .bind(
+      clip(body.intro, 2000),
+      clip(body.eventTime, 120),
+      clip(body.location, 120),
+      clip(body.duration, 120),
+      clip(body.address, 200),
+      clip(body.mapQuery, 200),
+      unixNow(),
+      tenant.id,
+    )
+    .run();
+  return json({ ok: true });
 }
 
 // ============================ submissions ============================
@@ -1284,6 +1315,9 @@ const APP_HTML = String.raw`<!doctype html>
     .guide-cta button{background:#fff;color:var(--brand)}
     @media(max-width:720px){.guide-row{grid-template-columns:1fr}.guide-row.rev .guide-art{order:0}}
     .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
+    .tenant-hero{margin-bottom:18px}
+    .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:#3c4250;font-size:14px;font-weight:600}
+    .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
   </style>
 </head>
 <body>
@@ -1349,7 +1383,7 @@ const APP_HTML = String.raw`<!doctype html>
           + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
-         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
+         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/manage\')">'+t('首页','Homepage')+'</button><button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
          + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?t('管理','Admin'):t('评委','Judge'))+'</span>'
          + '<button onclick="logout()">'+t('退出','Logout')+'</button>';
     } else {
@@ -1380,6 +1414,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/leaderboard') return renderLeaderboard();
     if(p === '/invites') return renderInvites();
     if(p === '/judges') return renderJudges();
+    if(p === '/manage') return renderTenantEdit();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
     app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
@@ -1387,7 +1422,8 @@ const APP_HTML = String.raw`<!doctype html>
 
   // ---------------- work wall ----------------
   async function renderWall(){
-    app.innerHTML = '<h1>'+esc(CONFIG.eventName)+' '+t('作品墙','Gallery')+'</h1><p>'+t('点开作品看演示视频、README 和代码。','Open a project to watch its demo, view its README and code.')+'</p>'
+    app.innerHTML = tenantHero()
+      + '<h1>'+esc((CONFIG.tenant&&CONFIG.tenant.name)||CONFIG.eventName)+' · '+t('作品墙','Gallery')+'</h1>'
       + '<div class="guide-banner" onclick="go(\'/guide\')"><span>🚀 '+t('第一次参加黑客松?读《如何在 AI 时代成为创新者》','First hackathon? Read “How to become a builder in the AI era”')+'</span><b>→</b></div>'
       + '<div id="wall" class="gallery"></div>';
     const wall = $('#wall');
@@ -1556,6 +1592,48 @@ const APP_HTML = String.raw`<!doctype html>
     } else {
       $('#hUpgrade').addEventListener('click', ()=>alert(t('支付功能即将上线,先联系主办方开通。','Payment coming soon — contact us to upgrade.')));
     }
+  }
+
+  // ---------------- tenant homepage (hero + editor) ----------------
+  function tenantHero(){
+    const tn = CONFIG.tenant; if(!tn) return '';
+    const bits = [];
+    if(tn.eventTime) bits.push('📅 '+esc(tn.eventTime));
+    if(tn.location) bits.push('📍 '+esc(tn.location));
+    if(tn.duration) bits.push('⏱ '+esc(tn.duration));
+    const q = tn.mapQuery || tn.address;
+    const map = q ? '<iframe class="map-embed" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="https://www.google.com/maps?q='+encodeURIComponent(q)+'&output=embed"></iframe>' : '';
+    if(!tn.intro && !bits.length && !tn.address && !map) return '';
+    return '<div class="panel tenant-hero">'
+      + (tn.intro?'<p style="font-size:16px;color:#3c4250;white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
+      + (bits.length?'<div class="hero-meta">'+bits.join('')+'</div>':'')
+      + (tn.address?'<div class="muted" style="margin-top:6px">📮 '+esc(tn.address)+'</div>':'')
+      + map
+      + '</div>';
+  }
+
+  function renderTenantEdit(){
+    if(ME.role !== 'admin'){ go('/'); return; }
+    const tn = CONFIG.tenant || {};
+    app.innerHTML = '<h1>'+t('首页设置','Homepage settings')+'</h1>'
+      + '<div class="panel" style="max-width:640px">'
+      + '<label>'+t('介绍','Intro')+'</label><textarea id="fIntro" maxlength="2000" rows="4" placeholder="'+t('这个黑客松是关于…','What this hackathon is about…')+'">'+esc(tn.intro||'')+'</textarea>'
+      + '<label>'+t('时间','Time')+'</label><input id="fTime" maxlength="120" value="'+esc(tn.eventTime||'')+'" placeholder="'+t('例:2026-08-15 ~ 08-17','e.g. Aug 15-17, 2026')+'">'
+      + '<label>'+t('地点','Location')+'</label><input id="fLoc" maxlength="120" value="'+esc(tn.location||'')+'" placeholder="'+t('例:上海·徐汇','e.g. Shanghai')+'">'
+      + '<label>'+t('持续周期','Duration')+'</label><input id="fDur" maxlength="120" value="'+esc(tn.duration||'')+'" placeholder="'+t('例:48 小时','e.g. 48 hours')+'">'
+      + '<label>'+t('地址(用于地图)','Address (for the map)')+'</label><input id="fAddr" maxlength="200" value="'+esc(tn.address||'')+'" placeholder="'+t('街道地址','street address')+'">'
+      + '<label>'+t('地图搜索词','Map query')+' <span class="muted">'+t('(留空则用地址)','(defaults to address)')+'</span></label><input id="fMap" maxlength="200" value="'+esc(tn.mapQuery||'')+'">'
+      + '<div class="row" style="margin-top:14px"><button id="fSave">'+t('保存','Save')+'</button><button class="ghost" onclick="go(\'/\')">'+t('返回','Back')+'</button><span id="fMsg" class="muted"></span></div>'
+      + '</div>';
+    $('#fSave').addEventListener('click', async ()=>{
+      $('#fSave').disabled=true;
+      try {
+        await api('/api/tenant/homepage',{method:'POST',body:{intro:$('#fIntro').value, eventTime:$('#fTime').value, location:$('#fLoc').value, duration:$('#fDur').value, address:$('#fAddr').value, mapQuery:$('#fMap').value}});
+        CONFIG = await api('/api/config');
+        setMsg('fMsg', t('已保存 ✓','Saved ✓'));
+      } catch(e){ setMsg('fMsg', e.message, true); }
+      finally { $('#fSave').disabled=false; }
+    });
   }
 
   function card(s){
