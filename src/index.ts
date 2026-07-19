@@ -1,0 +1,1449 @@
+interface Env {
+  DB: D1Database;
+  SHOTS: KVNamespace;
+  VIDEO_BUCKET?: R2Bucket;
+  APP_NAME: string;
+  EVENT_NAME?: string;
+  VIDEO_UPLOAD?: string; // "on" | "off"
+  MAX_VIDEO_BYTES?: string;
+  MAX_VIDEO_SECONDS?: string;
+  MAX_SHOTS?: string;
+  MAX_SHOT_BYTES?: string;
+  AUTH_SECRET: string;
+  SUBMIT_PASSCODE: string;
+  JUDGE_PASSCODE: string;
+  ADMIN_PASSCODE: string;
+  GITHUB_TOKEN?: string;
+  // R2 (only used when VIDEO_UPLOAD=on):
+  R2_ACCOUNT_ID?: string;
+  R2_BUCKET_NAME?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  SIGNED_UPLOAD_EXPIRES_SECONDS?: string;
+}
+
+type Auth = { role: "judge" | "admin"; name: string; jid: string; exp: number };
+
+const AUTH_COOKIE = "hv_auth";
+const DIMS = ["innovation", "technical", "completeness", "presentation"] as const;
+type Dim = (typeof DIMS)[number];
+const DEFAULT_MAX_SHOTS = 4;
+const DEFAULT_MAX_SHOT_BYTES = 1_500_000;
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      const url = new URL(request.url);
+      const path = url.pathname;
+      const method = request.method;
+      if (method === "OPTIONS") return noContent();
+
+      // ---- config & auth ----
+      if (path === "/api/config" && method === "GET") return getConfig(env);
+      if (path === "/api/auth/login" && method === "POST") return login(request, env);
+      if (path === "/api/auth/logout" && method === "POST") return logout(request);
+      if (path === "/api/auth/me" && method === "GET") return me(request, env);
+
+      // ---- submissions ----
+      if (path === "/api/submissions" && method === "GET") return listSubmissions(env);
+      if (path === "/api/submissions" && method === "POST") return createSubmission(request, env);
+      const subMatch = path.match(/^\/api\/submissions\/([^/]+)$/);
+      if (subMatch && method === "GET") return getSubmission(request, env, subMatch[1]);
+      const lockMatch = path.match(/^\/api\/submissions\/([^/]+)\/lock$/);
+      if (lockMatch && method === "POST") return lockSubmission(request, env, lockMatch[1]);
+      const hideMatch = path.match(/^\/api\/submissions\/([^/]+)\/hide$/);
+      if (hideMatch && method === "POST") return hideSubmission(request, env, hideMatch[1]);
+
+      // ---- screenshots (served from KV) ----
+      const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
+      if (shotMatch && method === "GET") return serveShot(env, shotMatch[1], Number(shotMatch[2]));
+
+      // ---- GitHub proxy ----
+      const readmeMatch = path.match(/^\/api\/gh\/([^/]+)\/([^/]+)\/readme$/);
+      if (readmeMatch && method === "GET") return ghReadme(env, readmeMatch[1], readmeMatch[2]);
+      const repoMatch = path.match(/^\/api\/gh\/([^/]+)\/([^/]+)$/);
+      if (repoMatch && method === "GET") return ghRepo(env, repoMatch[1], repoMatch[2]);
+
+      // ---- scoring ----
+      if (path === "/api/scores" && method === "GET") return listMyScores(request, env);
+      if (path === "/api/scores" && method === "POST") return upsertScore(request, env);
+      if (path === "/api/leaderboard" && method === "GET") return leaderboard(request, env);
+      if (path === "/api/scores/export" && method === "GET") return exportScores(request, env);
+
+      // ---- invite codes (admin) ----
+      if (path === "/api/invites" && method === "GET") return listInvites(request, env);
+      if (path === "/api/invites" && method === "POST") return generateInvites(request, env);
+
+      // ---- judge codes (admin) ----
+      if (path === "/api/judges" && method === "GET") return listJudges(request, env);
+      if (path === "/api/judges" && method === "POST") return createJudges(request, env);
+
+      // ---- reserved R2 upload (gated) ----
+      if (path === "/api/uploads/start" && method === "POST") return startUpload(request, env);
+      if (path === "/api/uploads/complete" && method === "POST") return completeUpload(request, env);
+      const mediaMatch = path.match(/^\/media\/([^/]+)\/video$/);
+      if (mediaMatch && method === "GET") return serveVideo(request, env, mediaMatch[1]);
+
+      if (method === "GET") return html(APP_HTML);
+      return json({ error: "Not found" }, 404);
+    } catch (error) {
+      console.error(error);
+      return json({ error: "Server error" }, 500);
+    }
+  },
+} satisfies ExportedHandler<Env>;
+
+// ============================ config & auth ============================
+
+function getConfig(env: Env): Response {
+  return json({
+    appName: env.APP_NAME || "HackVideo",
+    eventName: env.EVENT_NAME || "Hackathon",
+    videoUpload: env.VIDEO_UPLOAD === "on",
+    maxShots: numberEnv(env.MAX_SHOTS, DEFAULT_MAX_SHOTS),
+    maxShotBytes: numberEnv(env.MAX_SHOT_BYTES, DEFAULT_MAX_SHOT_BYTES),
+    maxVideoSeconds: numberEnv(env.MAX_VIDEO_SECONDS, 180),
+    dims: DIMS,
+  });
+}
+
+async function login(request: Request, env: Env): Promise<Response> {
+  const body = await request.json<{ code?: string; passcode?: string; name?: string }>().catch(() => null);
+  const code = String(body?.code ?? body?.passcode ?? "").trim();
+  if (!code) return json({ error: "请填写登录码 / Code required" }, 400);
+
+  let payload: Auth | null = null;
+  if (env.ADMIN_PASSCODE && code === env.ADMIN_PASSCODE) {
+    // Admin: passcode-based. Fixed stable identity so admin scores never collide with judges.
+    const name = String(body?.name ?? "").trim().slice(0, 40) || "管理员";
+    payload = { role: "admin", name, jid: "admin", exp: unixNow() + 7 * 24 * 60 * 60 };
+  } else {
+    // Judge: per-judge login code bound to a fixed name (stable scoring identity).
+    const judge = await env.DB.prepare("SELECT name FROM judges WHERE code = ?").bind(code).first<{ name: string }>();
+    if (!judge) return json({ error: "登录码无效 / Invalid code" }, 401);
+    payload = { role: "judge", name: judge.name, jid: `j:${code}`, exp: unixNow() + 7 * 24 * 60 * 60 };
+  }
+
+  const token = await signAuth(env, payload);
+  return json({ ok: true, role: payload.role, name: payload.name }, 200, {
+    "Set-Cookie": sessionCookie(request, token, 7 * 24 * 60 * 60),
+  });
+}
+
+function logout(request: Request): Response {
+  return json({ ok: true }, 200, { "Set-Cookie": sessionCookie(request, "", 0) });
+}
+
+function sessionCookie(request: Request, token: string, maxAge: number): string {
+  // Omit Secure on http (local `wrangler dev`) so the cookie is actually stored there.
+  const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
+  return `${AUTH_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+async function me(request: Request, env: Env): Promise<Response> {
+  const auth = await getAuth(request, env);
+  if (!auth) return json({ role: null });
+  return json({ role: auth.role, name: auth.name });
+}
+
+async function signAuth(env: Env, payload: Auth): Promise<string> {
+  const body = b64urlEncode(JSON.stringify(payload));
+  const sig = await hmacHex(utf8(env.AUTH_SECRET), body);
+  return `${body}.${sig}`;
+}
+
+async function getAuth(request: Request, env: Env): Promise<Auth | null> {
+  const raw = parseCookies(request.headers.get("cookie"))[AUTH_COOKIE];
+  if (!raw) return null;
+  const dot = raw.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const body = raw.slice(0, dot);
+  const sig = raw.slice(dot + 1);
+  const expected = await hmacHex(utf8(env.AUTH_SECRET), body);
+  if (!timingSafeEqual(sig, expected)) return null;
+  try {
+    const payload = JSON.parse(b64urlDecode(body)) as Auth;
+    if (!payload || typeof payload.exp !== "number" || payload.exp < unixNow()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function requireRole(request: Request, env: Env, need: "judge" | "admin"): Promise<Auth | null> {
+  const auth = await getAuth(request, env);
+  if (!auth) return null;
+  if (need === "admin") return auth.role === "admin" ? auth : null;
+  return auth; // judge or admin
+}
+
+// ============================ submissions ============================
+
+async function listSubmissions(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(
+    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE status = 'ready' ORDER BY created_at DESC LIMIT 300",
+  ).all<Record<string, unknown>>();
+  return json({ submissions: rows.results.map((r) => publicSubmission(r, false)) });
+}
+
+async function getSubmission(request: Request, env: Env, id: string): Promise<Response> {
+  const row = await env.DB.prepare(
+    "SELECT id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE id = ? AND status = 'ready'",
+  )
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (!row) return json({ error: "Not found" }, 404);
+  // Contact info (email/wechat) is for judges only — never expose it to anonymous viewers.
+  const auth = await getAuth(request, env);
+  return json({ submission: publicSubmission(row, Boolean(auth)) });
+}
+
+function publicSubmission(row: Record<string, unknown>, includeContact: boolean) {
+  const id = String(row.id);
+  const shotCount = Number(row.shot_count ?? 0);
+  return {
+    id,
+    projectName: row.project_name || row.team_name || "未命名作品",
+    teamName: row.team_name ?? "",
+    contact: includeContact ? (row.contact ?? null) : null,
+    repoOwner: row.repo_owner,
+    repoName: row.repo_name,
+    repoUrl: row.repo_url,
+    description: row.description ?? "",
+    videoUrl: row.video_url,
+    lockedSha: row.locked_sha ?? null,
+    createdAt: row.created_at,
+    shots: Array.from({ length: shotCount }, (_, i) => `/shot/${id}/${i}`),
+    viewUrl: `/p/${id}`,
+  };
+}
+
+async function createSubmission(request: Request, env: Env): Promise<Response> {
+  const body = await request
+    .json<{
+      passcode?: string;
+      projectName?: string;
+      teamName?: string;
+      contact?: string;
+      repoUrl?: string;
+      description?: string;
+      videoUrl?: string;
+      shots?: string[];
+      editToken?: string;
+    }>()
+    .catch(() => null);
+  if (!body) return json({ error: "Invalid JSON" }, 400);
+
+  const inviteCode = String(body.passcode ?? "").trim();
+  const projectName = String(body.projectName ?? "").trim().slice(0, 80);
+  const teamName = String(body.teamName ?? "").trim().slice(0, 80);
+  const contact = String(body.contact ?? "").trim().slice(0, 120) || null;
+  const description = String(body.description ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+  const videoUrl = String(body.videoUrl ?? "").trim();
+  const repo = parseRepoUrl(body.repoUrl);
+  const maxShots = numberEnv(env.MAX_SHOTS, DEFAULT_MAX_SHOTS);
+  const maxShotBytes = numberEnv(env.MAX_SHOT_BYTES, DEFAULT_MAX_SHOT_BYTES);
+
+  if (!projectName) return json({ error: "请填写产品名称 / Product name required" }, 400);
+  if (!repo) return json({ error: "GitHub 仓库链接无效 / Invalid GitHub repo URL" }, 400);
+  if (!isHttpUrl(videoUrl) || videoUrl.length > 500) {
+    return json({ error: "请填写有效的视频链接(B站/YouTube)/ Valid video link required" }, 400);
+  }
+  const shots = Array.isArray(body.shots) ? body.shots : [];
+  if (shots.length < 1) return json({ error: "请至少上传 1 张截图 / At least 1 screenshot required" }, 400);
+  if (shots.length > maxShots) return json({ error: `最多 ${maxShots} 张截图 / At most ${maxShots} screenshots` }, 400);
+
+  const decoded: { contentType: string; bytes: Uint8Array }[] = [];
+  for (const shot of shots) {
+    const parsed = dataUrlToBytes(shot);
+    if (!parsed || !parsed.contentType.startsWith("image/")) {
+      return json({ error: "截图必须是图片 / Screenshots must be images" }, 400);
+    }
+    if (parsed.bytes.byteLength > maxShotBytes) {
+      return json({ error: "单张截图过大 / A screenshot is too large" }, 400);
+    }
+    decoded.push(parsed);
+  }
+
+  // Verify the repo is public and exists.
+  const check = await ghGet(env, `/repos/${repo.owner}/${repo.repo}`);
+  if (check.status === 404) return json({ error: "仓库不存在或未公开 / Repo not found or not public" }, 400);
+  if (check.status === 200) {
+    try {
+      if (JSON.parse(check.text).private) return json({ error: "仓库需设为 Public / Repo must be public" }, 400);
+    } catch {
+      /* ignore parse issues, allow through */
+    }
+  }
+
+  const existing = await env.DB.prepare(
+    "SELECT id, edit_token, shot_count FROM submissions WHERE repo_owner = ? AND repo_name = ?",
+  )
+    .bind(repo.owner, repo.repo)
+    .first<{ id: string; edit_token: string; shot_count: number }>();
+
+  const now = unixNow();
+  const shotsMeta = JSON.stringify(decoded.map((d) => ({ contentType: d.contentType })));
+
+  if (existing) {
+    if (!body.editToken || body.editToken !== existing.edit_token) {
+      return json({ error: "该仓库已提交,如需修改请使用编辑令牌 / Already submitted; provide edit token to update" }, 409);
+    }
+    // Replace screenshots in KV.
+    await clearShots(env, existing.id, existing.shot_count);
+    await putShots(env, existing.id, decoded);
+    await env.DB.prepare(
+      "UPDATE submissions SET project_name = ?, team_name = ?, contact = ?, repo_url = ?, description = ?, video_url = ?, shot_count = ?, shots_meta = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(projectName, teamName, contact, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, now, existing.id)
+      .run();
+    return json({ ok: true, id: existing.id, editToken: existing.edit_token, viewUrl: `/p/${existing.id}`, updated: true });
+  }
+
+  // New submission: consume a per-team invite code (or the organizer master passcode).
+  const id = crypto.randomUUID();
+  const isMaster = Boolean(env.SUBMIT_PASSCODE) && inviteCode === env.SUBMIT_PASSCODE;
+  if (!isMaster) {
+    if (!inviteCode) return json({ error: "请填写邀请码 / Invite code required" }, 400);
+    const consumed = await env.DB.prepare(
+      "UPDATE invite_codes SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL",
+    )
+      .bind(id, unixNow(), inviteCode)
+      .run();
+    if (consumed.meta.changes !== 1) {
+      return json({ error: "邀请码无效或已被使用 / Invite code invalid or already used" }, 403);
+    }
+  }
+
+  const shareToken = randomToken(16);
+  const editToken = randomToken(18);
+  try {
+    await putShots(env, id, decoded);
+    await env.DB.prepare(
+      "INSERT INTO submissions (id, project_name, team_name, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
+    )
+      .bind(id, projectName, teamName, contact, repo.owner, repo.repo, repoUrl(repo), description, videoUrl, decoded.length, shotsMeta, shareToken, editToken, now, now)
+      .run();
+  } catch (error) {
+    // Roll back so a failed create (e.g. a repo-uniqueness race) doesn't burn the
+    // team's invite code or leave orphaned screenshots in KV.
+    if (!isMaster) {
+      await env.DB.prepare("UPDATE invite_codes SET used_by = NULL, used_at = NULL WHERE code = ? AND used_by = ?")
+        .bind(inviteCode, id)
+        .run()
+        .catch(() => {});
+    }
+    await clearShots(env, id, decoded.length).catch(() => {});
+    throw error;
+  }
+  return json({ ok: true, id, editToken, viewUrl: `/p/${id}` });
+}
+
+async function putShots(env: Env, id: string, shots: { contentType: string; bytes: Uint8Array }[]): Promise<void> {
+  await Promise.all(
+    shots.map((shot, i) =>
+      env.SHOTS.put(`shot:${id}:${i}`, shot.bytes, { metadata: { contentType: shot.contentType } }),
+    ),
+  );
+}
+
+async function clearShots(env: Env, id: string, count: number): Promise<void> {
+  await Promise.all(Array.from({ length: count }, (_, i) => env.SHOTS.delete(`shot:${id}:${i}`)));
+}
+
+async function serveShot(env: Env, id: string, idx: number): Promise<Response> {
+  const { value, metadata } = await env.SHOTS.getWithMetadata<{ contentType?: string }>(`shot:${id}:${idx}`, {
+    type: "arrayBuffer",
+  });
+  if (!value) return json({ error: "Not found" }, 404);
+  return new Response(value, {
+    headers: {
+      "Content-Type": metadata?.contentType || "image/jpeg",
+      "Cache-Control": "public, max-age=300",
+      "X-Robots-Tag": "noindex",
+    },
+  });
+}
+
+async function lockSubmission(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireRole(request, env, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const row = await env.DB.prepare("SELECT repo_owner, repo_name FROM submissions WHERE id = ?")
+    .bind(id)
+    .first<{ repo_owner: string; repo_name: string }>();
+  if (!row) return json({ error: "Not found" }, 404);
+  const res = await ghGet(env, `/repos/${row.repo_owner}/${row.repo_name}/commits?per_page=1`);
+  if (res.status !== 200) return json({ error: "无法获取最新提交 / Could not fetch latest commit" }, 502);
+  let sha = "";
+  try {
+    sha = JSON.parse(res.text)?.[0]?.sha ?? "";
+  } catch {
+    /* ignore */
+  }
+  if (!sha) return json({ error: "无法解析提交 SHA" }, 502);
+  await env.DB.prepare("UPDATE submissions SET locked_sha = ?, updated_at = ? WHERE id = ?")
+    .bind(sha, unixNow(), id)
+    .run();
+  return json({ ok: true, lockedSha: sha });
+}
+
+async function hideSubmission(request: Request, env: Env, id: string): Promise<Response> {
+  const auth = await requireRole(request, env, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  await env.DB.prepare("UPDATE submissions SET status = 'hidden', updated_at = ? WHERE id = ?")
+    .bind(unixNow(), id)
+    .run();
+  return json({ ok: true });
+}
+
+// ============================ GitHub proxy (cached) ============================
+
+async function ghGet(env: Env, path: string, accept = "application/vnd.github+json"): Promise<{ status: number; text: string }> {
+  const url = `https://api.github.com${path}`;
+  const cache = (caches as unknown as { default: Cache }).default;
+  const cacheKey = new Request(`${url}#${accept}`);
+  const hit = await cache.match(cacheKey);
+  if (hit) return { status: 200, text: await hit.text() };
+
+  const headers: Record<string, string> = { "User-Agent": "HackVideo-Worker", Accept: accept };
+  if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+  const upstream = await fetch(url, { headers });
+  const text = await upstream.text();
+  if (upstream.ok) {
+    await cache.put(
+      cacheKey,
+      new Response(text, {
+        headers: {
+          "Cache-Control": "public, max-age=600",
+          "Content-Type": upstream.headers.get("content-type") || "application/json",
+        },
+      }),
+    );
+  }
+  return { status: upstream.status, text };
+}
+
+async function ghRepo(env: Env, owner: string, repo: string): Promise<Response> {
+  const res = await ghGet(env, `/repos/${owner}/${repo}`);
+  if (res.status !== 200) return json({ error: "GitHub repo unavailable", status: res.status }, res.status === 404 ? 404 : 502);
+  const d = JSON.parse(res.text);
+  return json(
+    {
+      fullName: d.full_name,
+      description: d.description,
+      stars: d.stargazers_count,
+      forks: d.forks_count,
+      language: d.language,
+      pushedAt: d.pushed_at,
+      htmlUrl: d.html_url,
+      homepage: d.homepage,
+      defaultBranch: d.default_branch,
+      topics: d.topics ?? [],
+      openIssues: d.open_issues_count,
+    },
+    200,
+    { "Cache-Control": "public, max-age=300" },
+  );
+}
+
+async function ghReadme(env: Env, owner: string, repo: string): Promise<Response> {
+  const res = await ghGet(env, `/repos/${owner}/${repo}/readme`, "application/vnd.github.html+json");
+  if (res.status === 404) return json({ html: "<p>该仓库暂无 README。No README found.</p>" });
+  if (res.status !== 200) return json({ html: "<p>README 加载失败。Failed to load README.</p>" });
+  return json({ html: res.text });
+}
+
+// ============================ scoring ============================
+
+async function listMyScores(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "judge");
+  if (!auth) return json({ error: "Login required" }, 401);
+  const rows = await env.DB.prepare(
+    "SELECT submission_id, innovation, technical, completeness, presentation, comment FROM scores WHERE judge_id = ?",
+  )
+    .bind(auth.jid)
+    .all<Record<string, unknown>>();
+  const byId: Record<string, unknown> = {};
+  for (const r of rows.results) byId[String(r.submission_id)] = r;
+  return json({ scores: byId });
+}
+
+async function upsertScore(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "judge");
+  if (!auth) return json({ error: "Login required" }, 401);
+  const body = await request.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return json({ error: "Invalid JSON" }, 400);
+  const submissionId = String(body.submissionId ?? "");
+  if (!submissionId) return json({ error: "Missing submissionId" }, 400);
+  const exists = await env.DB.prepare("SELECT id FROM submissions WHERE id = ? AND status = 'ready'")
+    .bind(submissionId)
+    .first();
+  if (!exists) return json({ error: "Submission not found" }, 404);
+
+  const values: Record<Dim, number> = {} as Record<Dim, number>;
+  for (const dim of DIMS) {
+    const n = Math.round(Number(body[dim]));
+    if (!Number.isFinite(n) || n < 1 || n > 10) return json({ error: `${dim} 必须是 1-10 / must be 1-10` }, 400);
+    values[dim] = n;
+  }
+  const comment = String(body.comment ?? "").trim().slice(0, 500) || null;
+  const now = unixNow();
+  await env.DB.prepare(
+    `INSERT INTO scores (id, submission_id, judge_id, judge_name, innovation, technical, completeness, presentation, comment, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(submission_id, judge_id) DO UPDATE SET
+       judge_name = excluded.judge_name,
+       innovation = excluded.innovation, technical = excluded.technical,
+       completeness = excluded.completeness, presentation = excluded.presentation,
+       comment = excluded.comment, updated_at = excluded.updated_at`,
+  )
+    .bind(crypto.randomUUID(), submissionId, auth.jid, auth.name, values.innovation, values.technical, values.completeness, values.presentation, comment, now, now)
+    .run();
+  return json({ ok: true });
+}
+
+async function leaderboard(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "judge");
+  if (!auth) return json({ error: "Login required" }, 401);
+  const rows = await env.DB.prepare(
+    `SELECT s.id, s.project_name, s.team_name, s.repo_owner, s.repo_name,
+       COUNT(sc.id) AS judges,
+       AVG(sc.innovation + sc.technical + sc.completeness + sc.presentation) AS avg_total
+     FROM submissions s LEFT JOIN scores sc ON sc.submission_id = s.id
+     WHERE s.status = 'ready'
+     GROUP BY s.id
+     ORDER BY (avg_total IS NULL), avg_total DESC, s.created_at ASC`,
+  ).all<Record<string, unknown>>();
+  return json({
+    rows: rows.results.map((r) => ({
+      id: r.id,
+      projectName: r.project_name || r.team_name || "未命名作品",
+      teamName: r.team_name,
+      repo: `${r.repo_owner}/${r.repo_name}`,
+      judges: Number(r.judges ?? 0),
+      avgTotal: r.avg_total == null ? null : Math.round(Number(r.avg_total) * 10) / 10,
+    })),
+  });
+}
+
+async function exportScores(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const rows = await env.DB.prepare(
+    `SELECT s.project_name, s.team_name, s.repo_owner, s.repo_name, sc.judge_name,
+       sc.innovation, sc.technical, sc.completeness, sc.presentation,
+       (sc.innovation + sc.technical + sc.completeness + sc.presentation) AS total, sc.comment
+     FROM scores sc JOIN submissions s ON s.id = sc.submission_id
+     ORDER BY s.project_name, sc.judge_name`,
+  ).all<Record<string, unknown>>();
+  const header = ["product", "team", "repo", "judge", "innovation", "technical", "completeness", "presentation", "total", "comment"];
+  const lines = [header.join(",")];
+  for (const r of rows.results) {
+    lines.push(
+      [
+        r.project_name,
+        r.team_name,
+        `${r.repo_owner}/${r.repo_name}`,
+        r.judge_name,
+        r.innovation,
+        r.technical,
+        r.completeness,
+        r.presentation,
+        r.total,
+        r.comment ?? "",
+      ]
+        .map(csvCell)
+        .join(","),
+    );
+  }
+  return new Response(lines.join("\n"), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="hackvideo-scores.csv"',
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function csvCell(value: unknown): string {
+  const s = String(value ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// ============================ invite codes ============================
+
+async function generateInvites(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const body = await request.json<{ count?: number; prefix?: string }>().catch(() => null);
+  const count = Math.max(1, Math.min(500, Math.round(Number(body?.count) || 0)));
+  if (!count) return json({ error: "数量需为 1-500 / count must be 1-500" }, 400);
+  const prefix = (String(body?.prefix ?? "HV").trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || "HV").slice(0, 8);
+
+  const now = unixNow();
+  const codes: string[] = [];
+  const stmts: D1PreparedStatement[] = [];
+  const insert = env.DB.prepare("INSERT OR IGNORE INTO invite_codes (code, created_at) VALUES (?, ?)");
+  for (let i = 0; i < count; i += 1) {
+    const code = `${prefix}-${randomCodeBody(6)}`;
+    codes.push(code);
+    stmts.push(insert.bind(code, now));
+  }
+  await env.DB.batch(stmts);
+  return json({ ok: true, count: codes.length, codes });
+}
+
+async function listInvites(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const rows = await env.DB.prepare(
+    "SELECT code, used_by, created_at, used_at FROM invite_codes ORDER BY (used_by IS NOT NULL), created_at DESC LIMIT 1000",
+  ).all<{ code: string; used_by: string | null; created_at: number; used_at: number | null }>();
+  const codes = rows.results.map((r) => ({ code: r.code, used: r.used_by != null }));
+  return json({
+    total: codes.length,
+    unused: codes.filter((c) => !c.used).length,
+    codes,
+  });
+}
+
+async function createJudges(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const body = await request.json<{ names?: string[]; prefix?: string }>().catch(() => null);
+  const names = (Array.isArray(body?.names) ? body!.names : [])
+    .map((n) => String(n ?? "").trim().slice(0, 40))
+    .filter(Boolean)
+    .slice(0, 200);
+  if (!names.length) return json({ error: "请提供至少一个评委姓名 / At least one name required" }, 400);
+  const prefix = (String(body?.prefix ?? "J").trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || "J").slice(0, 8);
+
+  const now = unixNow();
+  const created: { name: string; code: string }[] = [];
+  const stmts: D1PreparedStatement[] = [];
+  const insert = env.DB.prepare("INSERT OR IGNORE INTO judges (code, name, created_at) VALUES (?, ?, ?)");
+  for (const name of names) {
+    const code = `${prefix}-${randomCodeBody(6)}`;
+    created.push({ name, code });
+    stmts.push(insert.bind(code, name, now));
+  }
+  await env.DB.batch(stmts);
+  return json({ ok: true, count: created.length, judges: created });
+}
+
+async function listJudges(request: Request, env: Env): Promise<Response> {
+  const auth = await requireRole(request, env, "admin");
+  if (!auth) return json({ error: "Admin only" }, 403);
+  const rows = await env.DB.prepare("SELECT code, name FROM judges ORDER BY created_at DESC LIMIT 500").all<{
+    code: string;
+    name: string;
+  }>();
+  return json({ judges: rows.results });
+}
+
+function randomCodeBody(len: number): string {
+  const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no I,O,0,1,L to avoid confusion
+  const bytes = new Uint8Array(len);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (const b of bytes) out += alphabet[b % alphabet.length];
+  return out;
+}
+
+// ============================ reserved R2 video upload (gated) ============================
+
+async function startUpload(request: Request, env: Env): Promise<Response> {
+  if (env.VIDEO_UPLOAD !== "on" || !env.VIDEO_BUCKET) {
+    return json({ error: "视频直传暂未开放,请填视频外链 / Direct upload disabled; use a video link" }, 503);
+  }
+  const body = await request
+    .json<{ passcode?: string; submissionId?: string; editToken?: string; filename?: string; contentType?: string; size?: number }>()
+    .catch(() => null);
+  if (!body || body.passcode !== env.SUBMIT_PASSCODE) return json({ error: "提交口令错误" }, 403);
+  const row = await env.DB.prepare("SELECT id, edit_token FROM submissions WHERE id = ?")
+    .bind(String(body.submissionId ?? ""))
+    .first<{ id: string; edit_token: string }>();
+  if (!row || body.editToken !== row.edit_token) return json({ error: "Not found" }, 404);
+
+  const maxBytes = numberEnv(env.MAX_VIDEO_BYTES, 80 * 1024 * 1024);
+  const size = Number(body.size);
+  if (!Number.isFinite(size) || size <= 0 || size > maxBytes) return json({ error: `视频需 ≤ ${Math.round(maxBytes / 1024 / 1024)}MB` }, 400);
+  const contentType = String(body.contentType || "video/mp4").split(";")[0];
+  const key = `submissions/${row.id}/video`;
+  const expires = numberEnv(env.SIGNED_UPLOAD_EXPIRES_SECONDS, 900);
+  const uploadUrl = await presignR2Put(env, key, contentType, expires);
+  return json({ uploadUrl, key, headers: { "Content-Type": contentType }, expiresInSeconds: expires });
+}
+
+async function completeUpload(request: Request, env: Env): Promise<Response> {
+  if (env.VIDEO_UPLOAD !== "on" || !env.VIDEO_BUCKET) return json({ error: "Disabled" }, 503);
+  const body = await request.json<{ submissionId?: string; editToken?: string }>().catch(() => null);
+  const row = await env.DB.prepare("SELECT id, edit_token FROM submissions WHERE id = ?")
+    .bind(String(body?.submissionId ?? ""))
+    .first<{ id: string; edit_token: string }>();
+  if (!row || body?.editToken !== row.edit_token) return json({ error: "Not found" }, 404);
+  const key = `submissions/${row.id}/video`;
+  const head = await env.VIDEO_BUCKET.head(key);
+  if (!head) return json({ error: "Upload not visible yet" }, 409);
+  await env.DB.prepare("UPDATE submissions SET video_key = ?, video_url = ?, updated_at = ? WHERE id = ?")
+    .bind(key, `/media/${row.id}/video`, unixNow(), row.id)
+    .run();
+  return json({ ok: true, videoUrl: `/media/${row.id}/video` });
+}
+
+async function serveVideo(request: Request, env: Env, id: string): Promise<Response> {
+  if (!env.VIDEO_BUCKET) return json({ error: "Not found" }, 404);
+  const row = await env.DB.prepare("SELECT video_key, video_url FROM submissions WHERE id = ? AND status = 'ready'")
+    .bind(id)
+    .first<{ video_key: string | null }>();
+  if (!row?.video_key) return json({ error: "Not found" }, 404);
+  const head = await env.VIDEO_BUCKET.head(row.video_key);
+  if (!head) return json({ error: "Not found" }, 404);
+  const range = parseRange(request.headers.get("range"), head.size);
+  const object = await env.VIDEO_BUCKET.get(
+    row.video_key,
+    range ? { range: { offset: range.start, length: range.end - range.start + 1 } } : undefined,
+  );
+  if (!object) return json({ error: "Not found" }, 404);
+  const headers = new Headers({
+    "Content-Type": head.httpMetadata?.contentType || "video/mp4",
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "public, max-age=300",
+  });
+  if (range) {
+    headers.set("Content-Range", `bytes ${range.start}-${range.end}/${head.size}`);
+    headers.set("Content-Length", String(range.end - range.start + 1));
+    return new Response(object.body, { status: 206, headers });
+  }
+  headers.set("Content-Length", String(head.size));
+  return new Response(object.body, { headers });
+}
+
+async function presignR2Put(env: Env, key: string, contentType: string, expiresSeconds: number): Promise<string> {
+  if (!env.R2_ACCOUNT_ID || !env.R2_BUCKET_NAME || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY) {
+    throw new Error("Missing R2 S3 credentials");
+  }
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const region = "auto";
+  const service = "s3";
+  const host = `${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+  const scope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const canonicalUri = `/${encodePathSegment(env.R2_BUCKET_NAME)}/${key.split("/").map(encodePathSegment).join("/")}`;
+  const params = new URLSearchParams({
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+    "X-Amz-Credential": `${env.R2_ACCESS_KEY_ID}/${scope}`,
+    "X-Amz-Date": amzDate,
+    "X-Amz-Expires": String(expiresSeconds),
+    "X-Amz-SignedHeaders": "content-type;host",
+    "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
+  });
+  params.sort();
+  const canonicalRequest = ["PUT", canonicalUri, params.toString(), `content-type:${contentType}\nhost:${host}\n`, "content-type;host", "UNSIGNED-PAYLOAD"].join("\n");
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, await sha256Hex(canonicalRequest)].join("\n");
+  const kDate = await hmacRaw(utf8(`AWS4${env.R2_SECRET_ACCESS_KEY}`), dateStamp);
+  const kRegion = await hmacRaw(kDate, region);
+  const kService = await hmacRaw(kRegion, service);
+  const signingKey = await hmacRaw(kService, "aws4_request");
+  params.set("X-Amz-Signature", await hmacHex(signingKey, stringToSign));
+  return `https://${host}${canonicalUri}?${params.toString()}`;
+}
+
+function parseRange(header: string | null, size: number): { start: number; end: number } | null {
+  if (!header) return null;
+  const match = header.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return null;
+  let start = match[1] ? Number(match[1]) : 0;
+  let end = match[2] ? Number(match[2]) : size - 1;
+  if (!match[1] && match[2]) {
+    start = Math.max(size - Number(match[2]), 0);
+    end = size - 1;
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size) return null;
+  return { start, end: Math.min(end, size - 1) };
+}
+
+// ============================ helpers ============================
+
+function parseRepoUrl(input: unknown): { owner: string; repo: string } | null {
+  const s = String(input ?? "").trim();
+  const m = s.match(/github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:[/#?].*)?$/i);
+  if (!m) return null;
+  const owner = m[1];
+  const repo = m[2].replace(/\.git$/i, "");
+  if (!owner || !repo || owner === "." || repo === ".") return null;
+  return { owner, repo };
+}
+
+function repoUrl(repo: { owner: string; repo: string }): string {
+  return `https://github.com/${repo.owner}/${repo.repo}`;
+}
+
+function isHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function dataUrlToBytes(dataUrl: unknown): { contentType: string; bytes: Uint8Array } | null {
+  const s = String(dataUrl ?? "");
+  if (!s.startsWith("data:")) return null;
+  const comma = s.indexOf(",");
+  if (comma < 0) return null;
+  const header = s.slice(5, comma);
+  if (!header.includes("base64")) return null;
+  const contentType = header.split(";")[0] || "application/octet-stream";
+  try {
+    const bin = atob(s.slice(comma + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    return { contentType, bytes };
+  } catch {
+    return null;
+  }
+}
+
+function b64urlEncode(str: string): string {
+  const bytes = utf8(str);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function b64urlDecode(str: string): string {
+  const bin = atob(str.replace(/-/g, "+").replace(/_/g, "/"));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+async function hmacRaw(key: ArrayBuffer | Uint8Array, data: string): Promise<ArrayBuffer> {
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return crypto.subtle.sign("HMAC", cryptoKey, utf8(data));
+}
+
+async function hmacHex(key: ArrayBuffer | Uint8Array, data: string): Promise<string> {
+  return hex(await hmacRaw(key, data));
+}
+
+async function sha256Hex(data: string): Promise<string> {
+  return hex(await crypto.subtle.digest("SHA-256", utf8(data)));
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function randomToken(bytes: number): string {
+  const data = new Uint8Array(bytes);
+  crypto.getRandomValues(data);
+  return btoa(String.fromCharCode(...data)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function parseCookies(header: string | null): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  for (const part of (header ?? "").split(";")) {
+    const [key, ...value] = part.trim().split("=");
+    if (key) cookies[key] = value.join("=");
+  }
+  return cookies;
+}
+
+function numberEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function unixNow(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+function utf8(input: string): Uint8Array {
+  return new TextEncoder().encode(input);
+}
+
+function hex(buffer: ArrayBuffer): string {
+  return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function encodePathSegment(segment: string): string {
+  return encodeURIComponent(segment).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...headers },
+  });
+}
+
+function html(body: string): Response {
+  return new Response(body, {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Robots-Tag": "noindex" },
+  });
+}
+
+function noContent(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Max-Age": "86400",
+    },
+  });
+}
+
+const APP_HTML = String.raw`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>HackVideo</title>
+  <style>
+    :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--ink:#14161c;--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10)}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+    a{color:var(--brand);text-decoration:none}
+    button,input,textarea,select{font:inherit}
+    button{border:0;background:var(--brand);color:#fff;border-radius:8px;padding:9px 15px;cursor:pointer;font-weight:650}
+    button:hover{background:var(--brand-dark)}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .ghost{background:#fff;color:var(--ink);border:1px solid var(--line)}
+    .ghost:hover{background:#eef1f6}
+    header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:rgba(255,255,255,.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:800;cursor:pointer}
+    .mark{width:30px;height:30px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
+    nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    nav .who{color:var(--muted);font-size:13px;margin-right:4px}
+    main{width:min(1200px,100%);margin:0 auto;padding:24px clamp(14px,4vw,32px) 72px}
+    h1{font-size:clamp(24px,4vw,36px);margin:0 0 8px}
+    h2{font-size:20px;margin:0 0 12px}
+    p{color:var(--muted);line-height:1.6}
+    label{display:block;font-size:13px;font-weight:700;margin:14px 0 6px}
+    input,textarea,select{width:100%;border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fff;color:var(--ink);outline:none}
+    textarea{min-height:84px;resize:vertical}
+    input:focus,textarea:focus,select:focus{border-color:var(--brand);box-shadow:0 0 0 3px rgba(91,75,230,.14)}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:var(--shadow)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    .muted{color:var(--muted);font-size:13px}
+    .notice{margin-top:14px;padding:11px 13px;border-radius:8px;background:#eef4ff;color:#25408f;word-break:break-word}
+    .notice.err{background:#fdeeec;color:var(--danger)}
+    .notice.ok{background:#e9f8f1;color:var(--ok)}
+    .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
+    .card{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column}
+    .carousel{position:relative;aspect-ratio:16/10;background:#0b0d12;overflow:hidden}
+    .carousel img{width:100%;height:100%;object-fit:cover;display:none}
+    .carousel img.on{display:block}
+    .carousel .nav-btn{position:absolute;top:50%;transform:translateY(-50%);width:30px;height:30px;border-radius:50%;background:rgba(15,17,24,.55);color:#fff;display:grid;place-items:center;cursor:pointer;font-size:16px;border:0;padding:0}
+    .carousel .nav-btn:hover{background:rgba(15,17,24,.8)}
+    .carousel .prev{left:8px}.carousel .next{right:8px}
+    .carousel .dots{position:absolute;bottom:8px;left:0;right:0;display:flex;justify-content:center;gap:5px}
+    .carousel .dot{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.5)}
+    .carousel .dot.on{background:#fff}
+    .vbadge{position:absolute;top:8px;left:8px;background:rgba(15,17,24,.65);color:#fff;font-size:11px;padding:3px 8px;border-radius:999px;display:flex;gap:4px;align-items:center}
+    .card-body{padding:13px;display:flex;flex-direction:column;gap:8px;cursor:pointer;flex:1}
+    .card-title{font-weight:750;line-height:1.35;color:var(--ink)}
+    .card-repo{font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
+    .card-desc{font-size:13px;color:#3c4250;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .card-meta{display:flex;gap:12px;font-size:12px;color:var(--muted);margin-top:auto;flex-wrap:wrap}
+    .chip{display:inline-flex;gap:4px;align-items:center}
+    .detail-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:20px;align-items:start}
+    .videobox{position:relative;aspect-ratio:16/9;background:#000;border-radius:10px;overflow:hidden}
+    .videobox iframe,.videobox video{position:absolute;inset:0;width:100%;height:100%;border:0}
+    .shot-strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;margin-top:12px}
+    .shot-strip img{height:88px;border-radius:8px;border:1px solid var(--line);cursor:pointer;flex:0 0 auto}
+    .readme-frame{width:100%;height:560px;border:1px solid var(--line);border-radius:10px;background:#fff;margin-top:8px}
+    .kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+    .kv:last-child{border-bottom:0}
+    .kv b{font-weight:650}
+    .score-dim{display:flex;align-items:center;gap:12px;margin:10px 0}
+    .score-dim label{margin:0;flex:1}
+    .score-dim input[type=range]{flex:2}
+    .score-dim .val{width:28px;text-align:center;font-weight:750}
+    table{width:100%;border-collapse:collapse}
+    th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);font-size:14px}
+    th{color:var(--muted);font-weight:650}
+    .rank{font-weight:800;color:var(--brand)}
+    .thumbs{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .thumbs .t{position:relative}
+    .thumbs img{height:70px;border-radius:8px;border:1px solid var(--line)}
+    .thumbs .x{position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:var(--danger);color:#fff;font-size:12px;line-height:20px;text-align:center;cursor:pointer}
+    .lightbox{position:fixed;inset:0;background:rgba(6,8,14,.9);display:grid;place-items:center;z-index:50;padding:24px}
+    .lightbox img{max-width:100%;max-height:100%;border-radius:8px}
+    .hidden{display:none!important}
+    @media(max-width:820px){.detail-grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand" onclick="go('/')"><div class="mark">HV</div><span id="brandName">HackVideo</span></div>
+    <nav id="nav"></nav>
+  </header>
+  <main id="app"></main>
+  <div id="lightbox" class="lightbox hidden" onclick="this.classList.add('hidden')"></div>
+
+  <script>
+  const app = document.getElementById('app');
+  const $ = (s, r=document) => r.querySelector(s);
+  let CONFIG = null, ME = { role: null };
+
+  function go(path){ history.pushState(null, '', path); route(); }
+  window.addEventListener('popstate', route);
+  window.go = go;
+
+  boot();
+  async function boot(){
+    CONFIG = await api('/api/config').catch(()=>({appName:'HackVideo',eventName:'Hackathon',maxShots:4,dims:['innovation','technical','completeness','presentation'],maxVideoSeconds:180}));
+    document.getElementById('brandName').textContent = CONFIG.appName;
+    document.title = CONFIG.appName;
+    ME = await api('/api/auth/me').catch(()=>({role:null}));
+    renderNav();
+    route();
+  }
+
+  function renderNav(){
+    const n = document.getElementById('nav');
+    let h = '<button class="ghost" onclick="go(\'/\')">作品墙</button>'
+          + '<button class="ghost" onclick="go(\'/submit\')">提交作品</button>';
+    if(ME.role){
+      h += '<button class="ghost" onclick="go(\'/leaderboard\')">排行榜</button>'
+         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/invites\')">邀请码</button><button class="ghost" onclick="go(\'/judges\')">评委</button>':'')
+         + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?'管理':'评委')+'</span>'
+         + '<button onclick="logout()">退出</button>';
+    } else {
+      h += '<button onclick="go(\'/judge\')">评审入口</button>';
+    }
+    n.innerHTML = h;
+  }
+
+  async function logout(){ await api('/api/auth/logout',{method:'POST',body:{}}).catch(()=>{}); ME={role:null}; renderNav(); go('/'); }
+  window.logout = logout;
+
+  function route(){
+    const p = location.pathname;
+    let m;
+    if(p === '/' || p === '') return renderWall();
+    if(p === '/submit') return renderSubmit();
+    if(p === '/judge') return renderJudge();
+    if(p === '/leaderboard') return renderLeaderboard();
+    if(p === '/invites') return renderInvites();
+    if(p === '/judges') return renderJudges();
+    if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
+    if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
+    app.innerHTML = '<div class="panel"><p>页面不存在。</p></div>';
+  }
+
+  // ---------------- work wall ----------------
+  async function renderWall(){
+    app.innerHTML = '<h1>'+esc(CONFIG.eventName)+' 作品墙</h1><p>点开作品看演示视频、README 和代码。</p><div id="wall" class="gallery"></div>';
+    const wall = $('#wall');
+    wall.innerHTML = '<p>加载中…</p>';
+    try {
+      const { submissions } = await api('/api/submissions');
+      if(!submissions.length){ wall.innerHTML = '<p>还没有作品,<a href="/submit" onclick="go(\'/submit\');return false">来交第一个</a >。</p>'; return; }
+      wall.innerHTML = '';
+      submissions.forEach(s => wall.appendChild(card(s)));
+    } catch(e){ wall.innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+  }
+
+  function card(s){
+    const el = document.createElement('div');
+    el.className = 'card';
+    const shots = s.shots.length ? s.shots : [];
+    const imgs = shots.map((u,i)=>'<img class="'+(i===0?'on':'')+'" src="'+u+'" alt="" loading="lazy">').join('');
+    const dots = shots.length>1 ? '<div class="dots">'+shots.map((_,i)=>'<span class="dot '+(i===0?'on':'')+'"></span>').join('')+'</div>' : '';
+    const arrows = shots.length>1 ? '<button class="nav-btn prev" data-d="-1">‹</button><button class="nav-btn next" data-d="1">›</button>' : '';
+    el.innerHTML =
+      '<div class="carousel" data-i="0">'
+      + '<span class="vbadge">▶ 视频</span>' + imgs + arrows + dots
+      + '</div>'
+      + '<div class="card-body">'
+      + '<div class="card-title">'+esc(s.projectName)+'</div>'
+      + (s.teamName?'<div class="muted" style="font-size:12px">👥 '+esc(s.teamName)+'</div>':'')
+      + '<div class="card-repo">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</div>'
+      + (s.description?'<div class="card-desc">'+esc(s.description)+'</div>':'')
+      + '<div class="card-meta" data-gh="'+esc(s.repoOwner)+'/'+esc(s.repoName)+'"><span class="chip">★ …</span></div>'
+      + '</div>';
+    // carousel nav
+    const car = el.querySelector('.carousel');
+    el.querySelectorAll('.nav-btn').forEach(btn => btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      const imgsEl = car.querySelectorAll('img');
+      const dotsEl = car.querySelectorAll('.dot');
+      let i = Number(car.dataset.i);
+      imgsEl[i].classList.remove('on'); if(dotsEl[i]) dotsEl[i].classList.remove('on');
+      i = (i + Number(btn.dataset.d) + imgsEl.length) % imgsEl.length;
+      imgsEl[i].classList.add('on'); if(dotsEl[i]) dotsEl[i].classList.add('on');
+      car.dataset.i = i;
+    }));
+    el.querySelector('.card-body').addEventListener('click', ()=>go(s.viewUrl));
+    // lazy GitHub stars/lang
+    loadGhMeta(el.querySelector('.card-meta'));
+    return el;
+  }
+
+  async function loadGhMeta(elm){
+    const [owner, repo] = elm.dataset.gh.split('/');
+    try {
+      const d = await api('/api/gh/'+owner+'/'+repo);
+      elm.innerHTML = '<span class="chip">★ '+(d.stars??0)+'</span>'
+        + (d.language?'<span class="chip">'+esc(d.language)+'</span>':'')
+        + '<span class="chip">更新 '+fmtDate(d.pushedAt)+'</span>';
+    } catch { elm.innerHTML = '<span class="chip">GitHub</span>'; }
+  }
+
+  // ---------------- detail ----------------
+  async function renderDetail(id){
+    app.innerHTML = '<div class="panel"><p>加载中…</p></div>';
+    let s;
+    try { s = (await api('/api/submissions/'+id)).submission; }
+    catch(e){ app.innerHTML = '<div class="panel"><p class="notice err">'+esc(e.message)+'</p></div>'; return; }
+    const embed = videoEmbed(s.videoUrl);
+    const videoHtml = embed
+      ? '<div class="videobox"><iframe src="'+embed+'" allow="accelerometer;autoplay;encrypted-media;gyroscope;picture-in-picture;fullscreen" allowfullscreen scrolling="no"></iframe></div>'
+      : (s.videoUrl.match(/\.(mp4|webm|mov)(\?|$)/i) || s.videoUrl.startsWith('/media/')
+          ? '<div class="videobox"><video controls playsinline src="'+esc(s.videoUrl)+'"></video></div>'
+          : '<div class="panel"><a href="'+esc(s.videoUrl)+'" target="_blank" rel="noopener">▶ 打开演示视频</a ></div>');
+    const strip = s.shots.map((u,i)=>'<img src="'+u+'" data-full="'+u+'" alt="screenshot '+(i+1)+'">').join('');
+    app.innerHTML =
+      '<div class="row" style="justify-content:space-between;margin-bottom:14px">'
+      + '<button class="ghost" onclick="go(\'/\')">← 返回作品墙</button>'
+      + '<a class="row" href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener"><button>查看代码 ↗</button></a >'
+      + '</div>'
+      + '<div class="detail-grid">'
+      + '<div>'
+      + videoHtml
+      + '<div class="shot-strip">'+strip+'</div>'
+      + '<h2 style="margin-top:22px">README</h2>'
+      + '<div id="readmeWrap"><button class="ghost" id="loadReadme">加载 README</button></div>'
+      + '</div>'
+      + '<div>'
+      + '<div class="panel">'
+      + '<h2>'+esc(s.projectName)+'</h2>'
+      + (s.teamName?'<div class="muted">👥 '+esc(s.teamName)+'</div>':'')
+      + (s.description?'<p style="color:#3c4250">'+esc(s.description)+'</p>':'')
+      + '<div class="kv"><span>仓库</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
+      + '<div id="ghMeta"></div>'
+      + (s.lockedSha?'<div class="kv"><span>评审版本</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
+      + '</div>'
+      + '<div id="scorePanel"></div>'
+      + '<div id="adminPanel"></div>'
+      + '</div>'
+      + '</div>';
+
+    // github meta
+    api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
+      $('#ghMeta').innerHTML =
+        '<div class="kv"><span>Stars</span><b>★ '+(d.stars??0)+'</b></div>'
+        + (d.language?'<div class="kv"><span>语言</span><b>'+esc(d.language)+'</b></div>':'')
+        + '<div class="kv"><span>最后提交</span><b>'+fmtDate(d.pushedAt)+'</b></div>'
+        + (d.homepage?'<div class="kv"><span>官网</span><b><a href="'+esc(d.homepage)+'" target="_blank" rel="noopener">链接 ↗</a ></b></div>':'');
+    }).catch(()=>{});
+
+    // screenshots lightbox
+    app.querySelectorAll('.shot-strip img').forEach(img=>img.addEventListener('click',()=>{
+      const lb = document.getElementById('lightbox');
+      lb.innerHTML = '<img src="'+img.dataset.full+'" alt="">';
+      lb.classList.remove('hidden');
+    }));
+
+    // readme
+    $('#loadReadme').addEventListener('click', async ()=>{
+      $('#loadReadme').disabled = true; $('#loadReadme').textContent = '加载中…';
+      try {
+        const { html } = await api('/api/gh/'+s.repoOwner+'/'+s.repoName+'/readme');
+        const frame = document.createElement('iframe');
+        frame.className = 'readme-frame';
+        frame.setAttribute('sandbox','allow-popups allow-popups-to-escape-sandbox');
+        frame.srcdoc = '<!doctype html><html><head><base target="_blank"><meta charset="utf-8">'
+          + '<style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;padding:16px 20px;max-width:900px;margin:0 auto;color:#14161c;line-height:1.6}'
+          + 'img{max-width:100%}pre{overflow:auto;background:#f6f8fa;padding:12px;border-radius:8px}code{background:#f0f2f5;padding:2px 5px;border-radius:4px}'
+          + 'pre code{background:none;padding:0}table{border-collapse:collapse}td,th{border:1px solid #e2e6ee;padding:6px 10px}a{color:#5b4be6}h1,h2{border-bottom:1px solid #eee;padding-bottom:.3em}</style>'
+          + '</head><body>'+html+'</body></html>';
+        $('#readmeWrap').innerHTML = '';
+        $('#readmeWrap').appendChild(frame);
+      } catch(e){ $('#readmeWrap').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+    });
+
+    if(ME.role) renderScorePanel(s);
+    if(ME.role === 'admin') renderAdminPanel(s);
+  }
+
+  async function renderScorePanel(s){
+    const box = $('#scorePanel');
+    let existing = {};
+    try { const { scores } = await api('/api/scores'); existing = scores[s.id] || {}; } catch {}
+    const labels = { innovation:'创新', technical:'技术', completeness:'完成度', presentation:'展示' };
+    box.innerHTML = '<div class="panel" style="margin-top:16px"><h2>我的评分</h2>'
+      + CONFIG.dims.map(d=>{
+          const v = existing[d] ?? 7;
+          return '<div class="score-dim"><label>'+labels[d]+'</label><input type="range" min="1" max="10" value="'+v+'" data-dim="'+d+'" oninput="this.nextElementSibling.textContent=this.value"><span class="val">'+v+'</span></div>';
+        }).join('')
+      + '<label>评语(可选)</label><textarea id="scoreComment" maxlength="500">'+esc(existing.comment||'')+'</textarea>'
+      + '<div class="row" style="margin-top:12px"><button id="saveScore">保存评分</button><span id="scoreMsg" class="muted"></span></div>'
+      + '</div>';
+    $('#saveScore').addEventListener('click', async ()=>{
+      const body = { submissionId: s.id, comment: $('#scoreComment').value };
+      box.querySelectorAll('input[data-dim]').forEach(i=>body[i.dataset.dim]=Number(i.value));
+      $('#saveScore').disabled = true;
+      try { await api('/api/scores',{method:'POST',body}); $('#scoreMsg').textContent='已保存 ✓'; }
+      catch(e){ $('#scoreMsg').textContent = e.message; }
+      finally { $('#saveScore').disabled = false; }
+    });
+  }
+
+  function renderAdminPanel(s){
+    const box = $('#adminPanel');
+    box.innerHTML = '<div class="panel" style="margin-top:16px"><h2>管理</h2>'
+      + '<div class="row"><button class="ghost" id="lockBtn">锁定评审版本(记录当前 commit)</button>'
+      + '<button class="ghost" id="hideBtn">隐藏该作品</button></div>'
+      + '<div id="adminMsg" class="muted" style="margin-top:8px"></div></div>';
+    $('#lockBtn').addEventListener('click', async ()=>{
+      try { const r = await api('/api/submissions/'+s.id+'/lock',{method:'POST',body:{}}); $('#adminMsg').textContent='已锁定 '+r.lockedSha.slice(0,10); }
+      catch(e){ $('#adminMsg').textContent = e.message; }
+    });
+    $('#hideBtn').addEventListener('click', async ()=>{
+      if(!confirm('确定隐藏该作品?')) return;
+      try { await api('/api/submissions/'+s.id+'/hide',{method:'POST',body:{}}); go('/'); }
+      catch(e){ $('#adminMsg').textContent = e.message; }
+    });
+  }
+
+  // ---------------- submit ----------------
+  let SHOTS = []; // dataURLs
+  async function renderSubmit(){
+    SHOTS = [];
+    app.innerHTML =
+      '<h1>提交作品</h1>'
+      + '<div class="panel" style="max-width:720px">'
+      + '<div class="notice">规则:① 视频请传到 <b>B站/YouTube</b>,这里贴链接(别塞进 Git);② 仓库必须 <b>Public</b>,否则评委看不到;③ PPT 放仓库 <code>/docs</code> 里的 <b>PDF</b>(GitHub 可在线预览);④ 截止后建议打 Release tag 锁版本。</div>'
+      + '<label>产品名称 * <span class="muted">(作品的主标题)</span></label><input id="projectName" maxlength="80" placeholder="你的产品 / 作品名">'
+      + '<label>GitHub 仓库链接 * <span class="muted">(必须 Public)</span></label><input id="repoUrl" placeholder="https://github.com/owner/repo">'
+      + '<label>演示视频链接 * <span class="muted">(B站 / YouTube)</span></label><input id="videoUrl" placeholder="https://www.bilibili.com/video/BV...">'
+      + '<label>一句话介绍 <span class="muted">(≤300 字)</span></label><textarea id="description" maxlength="300" placeholder="项目亮点 / 技术栈"></textarea>'
+      + '<label>队伍名称 <span class="muted">(可选)</span></label><input id="teamName" maxlength="80" placeholder="队名">'
+      + '<label>联系方式 <span class="muted">(可选,评委联系用)</span></label><input id="contact" maxlength="120" placeholder="微信 / 邮箱">'
+      + '<label>产品截图 * <span class="muted">(1–'+CONFIG.maxShots+' 张,自动压缩)</span></label>'
+      + '<input id="shotFiles" type="file" accept="image/*" multiple>'
+      + '<div class="thumbs" id="thumbs"></div>'
+      + '<label>邀请码 * <span class="muted">(主办方发给你队的专属码)</span></label><input id="passcode" placeholder="每队一个,如 HV-xxxxxx">'
+      + '<div class="row" style="margin-top:16px"><button id="submitBtn">提交</button></div>'
+      + '<div id="submitMsg"></div>'
+      + '</div>';
+    $('#shotFiles').addEventListener('change', onShots);
+    $('#submitBtn').addEventListener('click', doSubmit);
+  }
+
+  async function onShots(ev){
+    const files = [...ev.target.files];
+    ev.target.value = '';
+    for(const f of files){
+      if(SHOTS.length >= CONFIG.maxShots){ alert('最多 '+CONFIG.maxShots+' 张'); break; }
+      try { SHOTS.push(await compress(f)); } catch(e){ alert('图片处理失败:'+e.message); }
+    }
+    renderThumbs();
+  }
+
+  function renderThumbs(){
+    $('#thumbs').innerHTML = SHOTS.map((d,i)=>'<div class="t"><img src="'+d+'"><span class="x" data-i="'+i+'">×</span></div>').join('');
+    $('#thumbs').querySelectorAll('.x').forEach(x=>x.addEventListener('click',()=>{ SHOTS.splice(Number(x.dataset.i),1); renderThumbs(); }));
+  }
+
+  function compress(file){
+    return new Promise((resolve,reject)=>{
+      if(!file.type.startsWith('image/')) return reject(new Error('不是图片'));
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = ()=>{
+        const max = 1600;
+        let { width:w, height:h } = img;
+        if(w > max || h > max){ const r = Math.min(max/w, max/h); w = Math.round(w*r); h = Math.round(h*r); }
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve(c.toDataURL('image/jpeg', 0.82));
+      };
+      img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('无法读取')); };
+      img.src = url;
+    });
+  }
+
+  async function doSubmit(){
+    const body = {
+      passcode: $('#passcode').value.trim(),
+      projectName: $('#projectName').value.trim(),
+      teamName: $('#teamName').value.trim(),
+      contact: $('#contact').value.trim(),
+      repoUrl: $('#repoUrl').value.trim(),
+      description: $('#description').value.trim(),
+      videoUrl: $('#videoUrl').value.trim(),
+      shots: SHOTS,
+    };
+    if(!body.projectName || !body.repoUrl || !body.videoUrl){ setMsg('submitMsg','请填齐产品名、仓库、视频链接',true); return; }
+    if(!body.passcode){ setMsg('submitMsg','请填写邀请码',true); return; }
+    if(!SHOTS.length){ setMsg('submitMsg','请至少上传 1 张截图',true); return; }
+    $('#submitBtn').disabled = true; setMsg('submitMsg','提交中…');
+    try {
+      const r = await api('/api/submissions',{method:'POST',body});
+      const editLink = location.origin + r.viewUrl;
+      setMsg('submitMsg','提交成功!<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">查看作品</a ><br>编辑令牌(改稿用,请保存):<code>'+esc(r.editToken)+'</code>', false, true);
+    } catch(e){ setMsg('submitMsg', e.message, true); }
+    finally { $('#submitBtn').disabled = false; }
+  }
+
+  // ---------------- judge login ----------------
+  function renderJudge(){
+    if(ME.role){ go('/leaderboard'); return; }
+    app.innerHTML = '<h1>评审入口</h1><div class="panel" style="max-width:440px">'
+      + '<p>评委:输入主办方发给你的<b>专属登录码</b>(姓名由码决定)。管理员:输入管理口令。</p>'
+      + '<label>登录码 / 口令 *</label><input id="jCode" placeholder="评委登录码,或管理口令">'
+      + '<label>姓名 <span class="muted">(仅管理员可填)</span></label><input id="jName" maxlength="40" placeholder="管理员姓名(可选)">'
+      + '<div class="row" style="margin-top:14px"><button id="jLogin">登录</button></div>'
+      + '<div id="jMsg"></div></div>';
+    $('#jLogin').addEventListener('click', async ()=>{
+      try {
+        ME = await api('/api/auth/login',{method:'POST',body:{code:$('#jCode').value.trim(), name:$('#jName').value.trim()}});
+        renderNav(); go('/');
+      } catch(e){ setMsg('jMsg', e.message, true); }
+    });
+  }
+
+  // ---------------- leaderboard ----------------
+  async function renderLeaderboard(){
+    if(!ME.role){ go('/judge'); return; }
+    app.innerHTML = '<div class="row" style="justify-content:space-between"><h1>排行榜</h1>'
+      + (ME.role==='admin'?'<a href="/api/scores/export"><button class="ghost">导出 CSV</button></a >':'')
+      + '</div><div class="panel" id="lb"><p>加载中…</p></div>';
+    try {
+      const { rows } = await api('/api/leaderboard');
+      $('#lb').innerHTML = '<table><thead><tr><th>#</th><th>产品</th><th>仓库</th><th>评委数</th><th>平均分(满分40)</th></tr></thead><tbody>'
+        + rows.map((r,i)=>'<tr><td class="rank">'+(r.avgTotal==null?'-':i+1)+'</td><td>'+esc(r.projectName)+(r.teamName?' <span class="muted" style="font-size:12px">'+esc(r.teamName)+'</span>':'')+'</td>'
+          + '<td class="card-repo"><a href="/p/'+r.id+'" onclick="go(\'/p/'+r.id+'\');return false">'+esc(r.repo)+'</a ></td>'
+          + '<td>'+r.judges+'</td><td><b>'+(r.avgTotal==null?'未评':r.avgTotal)+'</b></td></tr>').join('')
+        + '</tbody></table>';
+    } catch(e){ $('#lb').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+  }
+
+  // ---------------- invite codes (admin) ----------------
+  async function renderInvites(){
+    if(ME.role !== 'admin'){ go('/judge'); return; }
+    app.innerHTML = '<h1>邀请码</h1><p>每队一个,单次有效。生成后发给各队,选手提交时填。</p>'
+      + '<div class="panel" style="max-width:640px">'
+      + '<div class="row"><div style="flex:1"><label>生成数量</label><input id="invCount" type="number" min="1" max="500" value="100"></div>'
+      + '<div style="flex:1"><label>前缀</label><input id="invPrefix" maxlength="8" value="HV"></div>'
+      + '<div style="align-self:flex-end"><button id="genBtn">生成</button></div></div>'
+      + '<div id="genOut"></div>'
+      + '</div>'
+      + '<div class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">已有邀请码</h2>'
+      + '<button class="ghost" id="copyUnused">复制全部未使用</button></div>'
+      + '<div id="invList" style="margin-top:12px"><p class="muted">加载中…</p></div></div>';
+
+    $('#genBtn').addEventListener('click', async ()=>{
+      const count = Number($('#invCount').value), prefix = $('#invPrefix').value.trim();
+      $('#genBtn').disabled = true;
+      try {
+        const r = await api('/api/invites',{method:'POST',body:{count,prefix}});
+        $('#genOut').innerHTML = '<div class="notice ok">已生成 '+r.count+' 个,复制发给各队:</div>'
+          + '<textarea readonly rows="6" style="font-family:ui-monospace,monospace">'+r.codes.join('\n')+'</textarea>';
+        loadInviteList();
+      } catch(e){ $('#genOut').innerHTML = '<div class="notice err">'+esc(e.message)+'</div>'; }
+      finally { $('#genBtn').disabled = false; }
+    });
+    $('#copyUnused').addEventListener('click', async ()=>{
+      const unused = (window.__invites||[]).filter(c=>!c.used).map(c=>c.code);
+      if(!unused.length){ alert('没有未使用的邀请码'); return; }
+      try { await navigator.clipboard.writeText(unused.join('\n')); $('#copyUnused').textContent='已复制 '+unused.length+' 个 ✓'; }
+      catch { alert(unused.join('\n')); }
+    });
+    loadInviteList();
+  }
+
+  async function loadInviteList(){
+    try {
+      const r = await api('/api/invites');
+      window.__invites = r.codes;
+      $('#invList').innerHTML = '<div class="muted" style="margin-bottom:8px">共 '+r.total+' 个,未使用 <b>'+r.unused+'</b> 个</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px">'
+        + r.codes.map(c=>'<code style="padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:'+(c.used?'#f3f4f6;color:#9aa1ac;text-decoration:line-through':'#fff')+'">'+esc(c.code)+'</code>').join('')
+        + '</div>';
+    } catch(e){ $('#invList').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+  }
+
+  // ---------------- judge codes (admin) ----------------
+  async function renderJudges(){
+    if(ME.role !== 'admin'){ go('/judge'); return; }
+    app.innerHTML = '<h1>评委登录码</h1><p>每个评委一个专属登录码,码绑定姓名,打分身份用码区分(不会同名互相覆盖)。</p>'
+      + '<div class="panel" style="max-width:640px">'
+      + '<label>评委姓名(每行一个)</label><textarea id="jNames" rows="5" placeholder="张三&#10;李四&#10;王五"></textarea>'
+      + '<div class="row" style="margin-top:6px"><div style="flex:1"><label>前缀</label><input id="jPrefix" maxlength="8" value="J"></div>'
+      + '<div style="align-self:flex-end"><button id="jGen">生成登录码</button></div></div>'
+      + '<div id="jGenOut"></div></div>'
+      + '<div class="panel" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h2 style="margin:0">已有评委</h2>'
+      + '<button class="ghost" id="jCopy">复制全部(姓名+码)</button></div>'
+      + '<div id="jList" style="margin-top:12px"><p class="muted">加载中…</p></div></div>';
+
+    $('#jGen').addEventListener('click', async ()=>{
+      const names = $('#jNames').value.split('\n').map(s=>s.trim()).filter(Boolean);
+      const prefix = $('#jPrefix').value.trim();
+      if(!names.length){ alert('请至少输入一个姓名'); return; }
+      $('#jGen').disabled = true;
+      try {
+        const r = await api('/api/judges',{method:'POST',body:{names,prefix}});
+        $('#jGenOut').innerHTML = '<div class="notice ok">已生成 '+r.count+' 个,发给各评委:</div>'
+          + '<textarea readonly rows="6" style="font-family:ui-monospace,monospace">'+r.judges.map(j=>j.name+'  '+j.code).join('\n')+'</textarea>';
+        $('#jNames').value = '';
+        loadJudgeList();
+      } catch(e){ $('#jGenOut').innerHTML = '<div class="notice err">'+esc(e.message)+'</div>'; }
+      finally { $('#jGen').disabled = false; }
+    });
+    $('#jCopy').addEventListener('click', async ()=>{
+      const all = (window.__judges||[]).map(j=>j.name+'  '+j.code).join('\n');
+      if(!all){ alert('还没有评委'); return; }
+      try { await navigator.clipboard.writeText(all); $('#jCopy').textContent='已复制 ✓'; }
+      catch { alert(all); }
+    });
+    loadJudgeList();
+  }
+
+  async function loadJudgeList(){
+    try {
+      const r = await api('/api/judges');
+      window.__judges = r.judges;
+      $('#jList').innerHTML = r.judges.length
+        ? '<table><thead><tr><th>姓名</th><th>登录码</th></tr></thead><tbody>'
+          + r.judges.map(j=>'<tr><td>'+esc(j.name)+'</td><td><code>'+esc(j.code)+'</code></td></tr>').join('')
+          + '</tbody></table>'
+        : '<p class="muted">还没有评委,上面生成。</p>';
+    } catch(e){ $('#jList').innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+  }
+
+  // ---------------- utils ----------------
+  function videoEmbed(url){
+    let m = url.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]+)/i);
+    if(m) return 'https://player.bilibili.com/player.html?bvid='+m[1]+'&page=1&high_quality=1&danmaku=0';
+    m = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([\w-]{11})/);
+    if(m) return 'https://www.youtube.com/embed/'+m[1];
+    return null;
+  }
+  function fmtDate(s){ if(!s) return '-'; const d=new Date(s); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+  function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function setMsg(id,msg,err,ok){ const t=document.getElementById(id); if(!t)return; t.className='notice'+(err?' err':ok?' ok':''); t.innerHTML=msg; }
+  async function api(path,opts={}){
+    const res = await fetch(path,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(data.error||('请求失败 '+res.status));
+    return data;
+  }
+  </script>
+</body>
+</html>`;

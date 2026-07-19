@@ -1,0 +1,16 @@
+# Copy to .dev.vars for local `npm run dev`. These become the Worker's secrets in production
+# (set them with `wrangler secret put <NAME>` instead of committing).
+
+AUTH_SECRET=dev-only-change-me-to-32-plus-random-chars
+SUBMIT_PASSCODE=submit-2026
+JUDGE_PASSCODE=judge-2026
+ADMIN_PASSCODE=admin-2026
+
+# GitHub token for the API proxy (repo metadata + README). Optional but strongly
+# recommended: without it the proxy is limited to 60 req/hour/IP; with it, 5000/hour.
+# Get one with `gh auth token`, or a fine-grained read-only public-repo token.
+GITHUB_TOKEN=
+
+# Only needed if you later enable direct R2 video upload (VIDEO_UPLOAD=on):
+# R2_ACCESS_KEY_ID=
+# R2_SECRET_ACCESS_KEY=

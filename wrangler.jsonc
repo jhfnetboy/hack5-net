@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hackvideo",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-18",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hackvideo-db",
+      "database_id": "f4b403ff-fd6e-42a0-aa15-7192339f0324"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SHOTS",
+      "id": "40e7013edb944d319a071229c1a1d805"
+    }
+  ],
+  "vars": {
+    "APP_NAME": "HackVideo",
+    "EVENT_NAME": "Hackathon",
+    "VIDEO_UPLOAD": "off",
+    "MAX_VIDEO_BYTES": "83886080",
+    "MAX_VIDEO_SECONDS": "180",
+    "MAX_SHOTS": "4",
+    "MAX_SHOT_BYTES": "1500000"
+  }
+  // R2 (direct video upload) and send_email (OTP) are intentionally omitted for now.
+  // To enable R2 video upload later, add:
+  //   "r2_buckets": [{ "binding": "VIDEO_BUCKET", "bucket_name": "hackvideo-uploads" }]
+  // set VIDEO_UPLOAD=on, and add R2_ACCOUNT_ID / R2_BUCKET_NAME vars + R2 secrets.
+}
