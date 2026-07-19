@@ -100,6 +100,11 @@ export default {
       // ---- premium: AI text-to-image poster background (admin, metered) ----
       if (path === "/api/tenant/poster/ai" && method === "POST") return generateAiPoster(request, env, tenant, tid);
 
+      // ---- homepage banner ----
+      if (path === "/api/tenant/banner" && method === "POST") return updateBanner(request, env, tenant);
+      const bannerServe = path.match(/^\/banner\/([a-z0-9-]+)$/);
+      if (bannerServe && method === "GET") return serveBanner(env, bannerServe[1]);
+
       // ---- team formation board ----
       if (path === "/api/tenant/teams" && method === "POST") return createTeamPost(request, env, tenant);
       if (path === "/api/tenant/teams" && method === "GET") return listTeamPosts(env, tid);
@@ -181,6 +186,7 @@ type Tenant = {
   address?: string;
   map_query?: string;
   agenda?: string;
+  banner?: string;
   org_name?: string;
   org_url?: string;
   org_has_logo?: number;
@@ -206,7 +212,7 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
-    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.location, t.duration, t.address, t.map_query, t.agenda,
+    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.location, t.duration, t.address, t.map_query, t.agenda, t.banner,
        u.org_name AS org_name, u.org_url AS org_url,
        CASE WHEN u.org_logo IS NOT NULL AND u.org_logo <> '' THEN 1 ELSE 0 END AS org_has_logo
      FROM tenants t LEFT JOIN users u ON u.email = t.owner_email
@@ -237,6 +243,7 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
           address: tctx.tenant.address ?? "",
           mapQuery: tctx.tenant.map_query ?? "",
           agenda: parseAgenda(tctx.tenant.agenda),
+          hasBanner: Boolean(tctx.tenant.banner),
           organizer: tctx.tenant.org_name
             ? { name: tctx.tenant.org_name, url: tctx.tenant.org_url ?? "", hasLogo: Boolean(tctx.tenant.org_has_logo) }
             : null,
@@ -541,14 +548,21 @@ function userCookie(request: Request, token: string, maxAge: number): string {
 async function createHackathon(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ error: "请先登录 / Please log in" }, 401);
-  const body = await request.json<{ name?: string; subdomain?: string }>().catch(() => null);
+  const body = await request.json<{ name?: string; subdomain?: string; intro?: string; banner?: string }>().catch(() => null);
   const name = String(body?.name ?? "").trim().slice(0, 60);
   const subdomain = String(body?.subdomain ?? "").trim().toLowerCase();
+  const intro = String(body?.intro ?? "").trim().slice(0, 2000);
   if (!name) return json({ error: "请填写黑客松名称 / Name required" }, 400);
   if (!/^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(subdomain)) {
     return json({ error: "子域名需 3-30 位小写字母/数字/连字符 / Invalid subdomain" }, 400);
   }
   if (RESERVED_SUBDOMAINS.has(subdomain)) return json({ error: "该子域名被保留 / Reserved subdomain" }, 400);
+  if (intro.length < 10) return json({ error: "请写一段黑客松简介(至少 10 字)/ Add an intro (10+ chars)" }, 400);
+  const bannerParsed = dataUrlToBytes(String(body?.banner ?? ""));
+  if (!bannerParsed || !bannerParsed.contentType.startsWith("image/")) {
+    return json({ error: "请上传一张 banner 图 / A banner image is required" }, 400);
+  }
+  if (bannerParsed.bytes.byteLength > 400 * 1024) return json({ error: "banner 图过大(≤400KB)/ Banner too large" }, 400);
 
   const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(subdomain).first();
   if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
@@ -566,9 +580,9 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const now = unixNow();
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, banner, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, '1', 'active', ?, ?)",
   )
-    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, now, now)
+    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, intro, now, now)
     .run();
 
   // Close the quota race deterministically: keep the earliest `quota` tenants; if a concurrent
@@ -589,6 +603,9 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
     return json({ error: "子域名配置失败,请重试 / Subdomain setup failed", detail: dnsErr }, 502);
   }
+
+  // Store the banner image now that the tenant is confirmed (survived quota + DNS).
+  await env.SHOTS.put(`banner:${id}`, bannerParsed.bytes, { metadata: { contentType: bannerParsed.contentType } });
 
   const root = env.ROOT_DOMAIN || "hack5.net";
   const url = `https://${subdomain}.${root}`;
@@ -960,6 +977,33 @@ async function servePhoto(env: Env, tid: string, id: string): Promise<Response> 
       "X-Robots-Tag": "noindex",
     },
   });
+}
+
+// Homepage banner: served by subdomain (public, cached), stored in KV as banner:<tid>.
+async function serveBanner(env: Env, sub: string): Promise<Response> {
+  const row = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ? AND status = 'active'")
+    .bind(sub)
+    .first<{ id: string }>();
+  if (!row) return json({ error: "Not found" }, 404);
+  const { value, metadata } = await env.SHOTS.getWithMetadata<{ contentType?: string }>(`banner:${row.id}`, {
+    type: "arrayBuffer",
+  });
+  if (!value) return json({ error: "Not found" }, 404);
+  return new Response(value, {
+    headers: { "Content-Type": metadata?.contentType || "image/jpeg", "Cache-Control": "public, max-age=3600" },
+  });
+}
+
+async function updateBanner(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
+  const auth = await requireRole(request, env, tenant ? tenant.id : null, "admin");
+  if (!auth || !tenant) return json({ error: "Admin only" }, 403);
+  const body = await request.json<{ banner?: string }>().catch(() => null);
+  const parsed = dataUrlToBytes(String(body?.banner ?? ""));
+  if (!parsed || !parsed.contentType.startsWith("image/")) return json({ error: "请上传图片 / Image required" }, 400);
+  if (parsed.bytes.byteLength > 400 * 1024) return json({ error: "图片过大(≤400KB)/ Too large" }, 400);
+  await env.SHOTS.put(`banner:${tenant.id}`, parsed.bytes, { metadata: { contentType: parsed.contentType } });
+  await env.DB.prepare("UPDATE tenants SET banner = '1' WHERE id = ?").bind(tenant.id).run();
+  return json({ ok: true });
 }
 
 async function uploadPhotos(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
