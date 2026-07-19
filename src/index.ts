@@ -563,7 +563,7 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   if (!bannerParsed || !bannerParsed.contentType.startsWith("image/")) {
     return json({ error: "请上传一张 banner 图 / A banner image is required" }, 400);
   }
-  if (bannerParsed.bytes.byteLength > 400 * 1024) return json({ error: "banner 图过大(≤400KB)/ Banner too large" }, 400);
+  if (bannerParsed.bytes.byteLength > 160 * 1024) return json({ error: "banner 图过大(≤120KB)/ Banner too large" }, 400);
 
   const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(subdomain).first();
   if (taken) return json({ error: "子域名已被占用 / Subdomain taken" }, 409);
@@ -1032,7 +1032,7 @@ async function updateBanner(request: Request, env: Env, tenant: Tenant | null): 
   const body = await request.json<{ banner?: string }>().catch(() => null);
   const parsed = dataUrlToBytes(String(body?.banner ?? ""));
   if (!parsed || !parsed.contentType.startsWith("image/")) return json({ error: "请上传图片 / Image required" }, 400);
-  if (parsed.bytes.byteLength > 400 * 1024) return json({ error: "图片过大(≤400KB)/ Too large" }, 400);
+  if (parsed.bytes.byteLength > 160 * 1024) return json({ error: "图片过大(≤120KB)/ Too large" }, 400);
   await env.SHOTS.put(`banner:${tenant.id}`, parsed.bytes, { metadata: { contentType: parsed.contentType } });
   await env.DB.prepare("UPDATE tenants SET banner = '1' WHERE id = ?").bind(tenant.id).run();
   return json({ ok: true });
@@ -1976,6 +1976,8 @@ const APP_HTML = String.raw`<!doctype html>
     .orglogo-prev{width:64px;height:64px;border:1px solid var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:repeating-conic-gradient(#f0f2f1 0% 25%,#fff 0% 50%) 50%/16px 16px}
     .orglogo-prev img{max-width:100%;max-height:100%;object-fit:contain}
     .tenant-hero{margin-bottom:18px}
+    .hero-banner{margin:-20px -20px 16px;overflow:hidden;aspect-ratio:1280/440;background:var(--ghost-hover)}
+    .hero-banner img{width:100%;height:100%;object-fit:cover;display:block}
     .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:var(--ink2);font-size:14px;font-weight:600}
     .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
     .map-links{margin-top:10px;font-size:13px;color:var(--muted)}
@@ -2385,16 +2387,26 @@ const APP_HTML = String.raw`<!doctype html>
       + (canCreate
           ? '<label>'+t('名称','Name')+'</label><input id="hName" maxlength="60" placeholder="'+t('例:上海 2026 黑客松','e.g. Shanghai 2026 Hackathon')+'">'
             + '<label>'+t('子域名','Subdomain')+' <span class="muted">.hack5.net</span></label><input id="hSub" maxlength="30" placeholder="shanghai2026">'
+            + '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…,欢迎…','A hackathon about… for… come build…')+'"></textarea>'
+            + '<label>'+t('首页 Banner 图','Homepage banner')+' * <span class="muted">'+t('(宽图,自动裁 16:9)','(wide image, auto-cropped 16:9)')+'</span></label><input id="hBanner" type="file" accept="image/*"><div id="hBannerPrev"></div>'
             + '<div class="row" style="margin-top:14px"><button id="hCreate">'+t('创建并部署','Create & deploy')+'</button></div><div id="hMsg"></div>'
           : '<div class="notice">'+t('已达免费额度。充值 ¥99 可举办 100 场。','Free quota reached. Upgrade (¥99) for 100 hackathons.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('充值 ¥99','Upgrade ¥99')+'</button></div>')
       + '</div></div>';
     if(canCreate){
+      const bf=$('#hBanner'); if(bf) bf.addEventListener('change', async ev=>{
+        const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
+        try{ window.__hBanner=await compressBanner(f); $('#hBannerPrev').innerHTML='<img src="'+window.__hBanner+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;margin-top:8px;border:1px solid var(--line)">'; }
+        catch(e){ setMsg('hMsg', t('图片处理失败','Image error')+': '+e.message, true); }
+      });
       $('#hCreate').addEventListener('click', async ()=>{
-        const name=$('#hName').value.trim(), subdomain=$('#hSub').value.trim().toLowerCase();
+        const name=$('#hName').value.trim(), subdomain=$('#hSub').value.trim().toLowerCase(), intro=$('#hIntro').value.trim();
         if(!name || !subdomain){ setMsg('hMsg', t('请填写名称和子域名','Fill in name and subdomain'), true); return; }
+        if(intro.length<10){ setMsg('hMsg', t('请写至少 10 字的简介','Add a 10+ character intro'), true); return; }
+        if(!window.__hBanner){ setMsg('hMsg', t('请上传一张 Banner 图','Upload a banner image'), true); return; }
         $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
         try {
-          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain}});
+          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,banner:window.__hBanner}});
+          window.__hBanner='';
           const pw = r.adminPassword;
           const masked = pw.length>7 ? (pw.slice(0,-5)+'****'+pw.slice(-2)) : pw;
           window.__hpw = pw;
@@ -2439,8 +2451,10 @@ const APP_HTML = String.raw`<!doctype html>
     const ag = tn.agenda || [];
     const agHtml = ag.length ? '<div class="agenda"><div class="ag-h">'+t('日程 · Agenda','Agenda')+'</div>'
       + ag.map(a=>'<div class="ag-item"><span class="ag-t">'+esc(a.time||'')+'</span><span class="ag-x">'+esc(a.title||'')+'</span></div>').join('')+'</div>' : '';
-    if(!tn.intro && !bits.length && !tn.address && !map && !agHtml) return '';
+    const banner = tn.hasBanner ? '<div class="hero-banner"><img src="/banner/'+esc(tn.subdomain)+'" alt=""></div>' : '';
+    if(!banner && !tn.intro && !bits.length && !tn.address && !map && !agHtml) return '';
     return '<div class="panel tenant-hero">'
+      + banner
       + (tn.intro?'<p style="font-size:16px;color:var(--ink2);white-space:pre-wrap;margin:0 0 10px">'+esc(tn.intro)+'</p>':'')
       + (bits.length?'<div class="hero-meta">'+bits.join('')+'</div>':'')
       + (tn.address?'<div class="muted" style="margin-top:6px">📮 '+esc(tn.address)+'</div>':'')
@@ -2456,6 +2470,9 @@ const APP_HTML = String.raw`<!doctype html>
     app.innerHTML = '<h1>'+t('首页设置','Homepage settings')+'</h1>'
       + '<div class="panel" style="max-width:640px">'
       + '<label>'+t('介绍','Intro')+'</label><textarea id="fIntro" maxlength="2000" rows="4" placeholder="'+t('这个黑客松是关于…','What this hackathon is about…')+'">'+esc(tn.intro||'')+'</textarea>'
+      + '<label>'+t('首页 Banner','Homepage banner')+' <span class="muted">'+t('(宽图,自动裁 16:9 内并压 ≤120KB)','(wide, auto-cropped & ≤120KB)')+'</span></label>'
+      + '<div id="fBannerPrev">'+(tn.hasBanner?'<img src="/banner/'+esc(tn.subdomain||'')+'?t='+Date.now()+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;border:1px solid var(--line);display:block;margin-bottom:8px">':'')+'</div>'
+      + '<input id="fBanner" type="file" accept="image/*"><span id="fBannerMsg" class="muted"></span>'
       + '<label>'+t('时间','Time')+'</label><input id="fTime" maxlength="120" value="'+esc(tn.eventTime||'')+'" placeholder="'+t('例:2026-08-15 ~ 08-17','e.g. Aug 15-17, 2026')+'">'
       + '<label>'+t('地点','Location')+'</label><input id="fLoc" maxlength="120" value="'+esc(tn.location||'')+'" placeholder="'+t('例:上海·徐汇','e.g. Shanghai')+'">'
       + '<label>'+t('持续周期','Duration')+'</label><input id="fDur" maxlength="120" value="'+esc(tn.duration||'')+'" placeholder="'+t('例:48 小时','e.g. 48 hours')+'">'
@@ -2472,6 +2489,14 @@ const APP_HTML = String.raw`<!doctype html>
         setMsg('fMsg', t('已保存 ✓','Saved ✓'));
       } catch(e){ setMsg('fMsg', e.message, true); }
       finally { $('#fSave').disabled=false; }
+    });
+    $('#fBanner').addEventListener('change', async ev=>{
+      const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
+      setMsg('fBannerMsg', t('处理中…','Processing…'));
+      try{ const b=await compressBanner(f); await api('/api/tenant/banner',{method:'POST',body:{banner:b}});
+        $('#fBannerPrev').innerHTML='<img src="'+b+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;border:1px solid var(--line);display:block;margin-bottom:8px">';
+        CONFIG = await api('/api/config'); setMsg('fBannerMsg', t('Banner 已更新 ✓','Banner updated ✓'));
+      }catch(e){ setMsg('fBannerMsg', e.message, true); }
     });
   }
 
@@ -3000,6 +3025,28 @@ const APP_HTML = String.raw`<!doctype html>
     });
   }
   function dataUrlBytes(d){ const i = d.indexOf(','); if(i<0) return 0; const n = d.length - i - 1; const pad = d.endsWith('==')?2:(d.endsWith('=')?1:0); return Math.floor(n*3/4) - pad; }
+  // Homepage banner: crop to a wide hero ratio (~2.9:1) and step JPEG quality down until <=120KB.
+  function compressBanner(file){
+    return new Promise(function(resolve,reject){
+      if(!file.type.startsWith('image/')) return reject(new Error(t('请选择图片','Pick an image')));
+      const img=new Image(); const url=URL.createObjectURL(file);
+      img.onload=function(){
+        const ratio=1280/440;
+        let cw=img.width, ch=Math.round(img.width/ratio);
+        if(ch>img.height){ ch=img.height; cw=Math.round(img.height*ratio); }
+        const sx=Math.round((img.width-cw)/2), sy=Math.round((img.height-ch)/2);
+        const outW=Math.min(cw,1280), outH=Math.round(outW/ratio);
+        const c=document.createElement('canvas'); c.width=outW; c.height=outH;
+        c.getContext('2d').drawImage(img,sx,sy,cw,ch,0,0,outW,outH); URL.revokeObjectURL(url);
+        let q=0.85, out=c.toDataURL('image/jpeg',q);
+        while(dataUrlBytes(out)>120000 && q>0.4){ q-=0.1; out=c.toDataURL('image/jpeg',q); }
+        if(dataUrlBytes(out)>120000) return reject(new Error(t('图片太大,换一张更简单的','Image too large — try another')));
+        resolve(out);
+      };
+      img.onerror=function(){ URL.revokeObjectURL(url); reject(new Error(t('无法读取图片','Cannot read image'))); };
+      img.src=url;
+    });
+  }
 
   async function doSubmit(){
     const body = {
