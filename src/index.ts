@@ -73,6 +73,10 @@ export default {
       if (path === "/api/platform/login/verify" && method === "POST") return platformLoginVerify(request, env);
       if (path === "/api/platform/logout" && method === "POST") return platformLogout(request);
       if (path === "/api/platform/hackathons" && method === "POST") return createHackathon(request, env);
+      if (path === "/api/platform/org" && method === "GET") return getOrgProfile(request, env);
+      if (path === "/api/platform/org" && method === "POST") return saveOrgProfile(request, env);
+      const orgLogo = path.match(/^\/org-logo\/([a-z0-9-]+)$/);
+      if (orgLogo && method === "GET") return serveOrgLogo(env, orgLogo[1]);
 
       // ---- tenant homepage (admin) ----
       if (path === "/api/tenant/homepage" && method === "POST") return updateHomepage(request, env, tenant);
@@ -160,6 +164,9 @@ type Tenant = {
   address?: string;
   map_query?: string;
   agenda?: string;
+  org_name?: string;
+  org_url?: string;
+  org_has_logo?: number;
 };
 
 // Resolve which hackathon (tenant) a request is for, from the Host.
@@ -182,7 +189,11 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
-    "SELECT id, subdomain, name, admin_pass_hash, intro, event_time, location, duration, address, map_query, agenda FROM tenants WHERE subdomain = ? AND status = 'active'",
+    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.location, t.duration, t.address, t.map_query, t.agenda,
+       u.org_name AS org_name, u.org_url AS org_url,
+       CASE WHEN u.org_logo IS NOT NULL AND u.org_logo <> '' THEN 1 ELSE 0 END AS org_has_logo
+     FROM tenants t LEFT JOIN users u ON u.email = t.owner_email
+     WHERE t.subdomain = ? AND t.status = 'active'`,
   )
     .bind(sub)
     .first<Tenant>();
@@ -209,6 +220,9 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
           address: tctx.tenant.address ?? "",
           mapQuery: tctx.tenant.map_query ?? "",
           agenda: parseAgenda(tctx.tenant.agenda),
+          organizer: tctx.tenant.org_name
+            ? { name: tctx.tenant.org_name, url: tctx.tenant.org_url ?? "", hasLogo: Boolean(tctx.tenant.org_has_logo) }
+            : null,
         }
       : null,
     eventName: env.EVENT_NAME || "Hackathon",
@@ -348,6 +362,68 @@ async function platformMe(request: Request, env: Env): Promise<Response> {
     plan: row?.plan ?? "free",
     used: list.results.length,
     hackathons: list.results.map((h) => ({ subdomain: h.subdomain, name: h.name, url: `https://${h.subdomain}.hack5.net` })),
+  });
+}
+
+// Organizer (host) org profile — account-level, reused across all their hackathons.
+async function getOrgProfile(request: Request, env: Env): Promise<Response> {
+  const user = await getUser(request, env);
+  if (!user) return json({ error: "未登录 / Not logged in" }, 401);
+  const row = await env.DB.prepare(
+    "SELECT org_name, org_intro, org_url, org_contact, org_logo FROM users WHERE email = ?",
+  )
+    .bind(user.email)
+    .first<{ org_name: string | null; org_intro: string | null; org_url: string | null; org_contact: string | null; org_logo: string | null }>();
+  return json({
+    orgName: row?.org_name ?? "",
+    orgIntro: row?.org_intro ?? "",
+    orgUrl: row?.org_url ?? "",
+    orgContact: row?.org_contact ?? "",
+    orgLogo: row?.org_logo ?? "",
+  });
+}
+
+async function saveOrgProfile(request: Request, env: Env): Promise<Response> {
+  const user = await getUser(request, env);
+  if (!user) return json({ error: "未登录 / Not logged in" }, 401);
+  const body = await request
+    .json<{ orgName?: string; orgIntro?: string; orgUrl?: string; orgContact?: string; orgLogo?: string }>()
+    .catch(() => null);
+  const clip = (v: unknown, n: number) => String(v ?? "").trim().slice(0, n) || null;
+  const orgName = clip(body?.orgName, 80);
+  const orgIntro = clip(body?.orgIntro, 500);
+  const orgUrl = clip(body?.orgUrl, 200);
+  if (orgUrl && !isHttpUrl(orgUrl)) return json({ error: "网址需以 http(s):// 开头 / URL must start with http(s)://" }, 400);
+  const orgContact = clip(body?.orgContact, 120);
+  // Logo: optional, must be a small transparent PNG data URI (client resizes to 180×180).
+  let orgLogo: string | null = null;
+  const rawLogo = String(body?.orgLogo ?? "");
+  if (rawLogo) {
+    if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(rawLogo) || rawLogo.length > 120_000) {
+      return json({ error: "Logo 需为 PNG,且不超过大小上限 / Logo must be a PNG within the size limit" }, 400);
+    }
+    orgLogo = rawLogo;
+  }
+  await env.DB.prepare("INSERT OR IGNORE INTO users (email, quota, plan, created_at) VALUES (?, 1, 'free', ?)")
+    .bind(user.email, unixNow())
+    .run();
+  await env.DB.prepare("UPDATE users SET org_name = ?, org_intro = ?, org_url = ?, org_contact = ?, org_logo = ? WHERE email = ?")
+    .bind(orgName, orgIntro, orgUrl, orgContact, orgLogo, user.email)
+    .run();
+  return json({ ok: true });
+}
+
+// Serve a tenant's organizer logo (public, cached) so tenant pages can show the host brand.
+async function serveOrgLogo(env: Env, sub: string): Promise<Response> {
+  const row = await env.DB.prepare(
+    "SELECT u.org_logo AS logo FROM tenants t JOIN users u ON u.email = t.owner_email WHERE t.subdomain = ? AND t.status = 'active'",
+  )
+    .bind(sub)
+    .first<{ logo: string | null }>();
+  const parsed = row?.logo ? dataUrlToBytes(row.logo) : null;
+  if (!parsed) return json({ error: "Not found" }, 404);
+  return new Response(parsed.bytes, {
+    headers: { "Content-Type": parsed.contentType, "Cache-Control": "public, max-age=3600" },
   });
 }
 
@@ -1701,6 +1777,10 @@ const APP_HTML = String.raw`<!doctype html>
     .guide-cta button{background:#fff;color:var(--brand)}
     @media(max-width:720px){.guide-row{grid-template-columns:1fr}.guide-row.rev .guide-art{order:0}}
     .site-footer{text-align:center;padding:26px 16px;margin-top:48px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;line-height:1.7}
+    .org-foot{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:12px;font-size:14px;color:#3c4250;font-weight:600}
+    .org-foot-logo{width:28px;height:28px;object-fit:contain;border-radius:6px}
+    .orglogo-prev{width:64px;height:64px;border:1px solid var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:repeating-conic-gradient(#f0f2f1 0% 25%,#fff 0% 50%) 50%/16px 16px}
+    .orglogo-prev img{max-width:100%;max-height:100%;object-fit:contain}
     .tenant-hero{margin-bottom:18px}
     .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:#3c4250;font-size:14px;font-weight:600}
     .map-embed{width:100%;height:280px;border:0;border-radius:10px;margin-top:12px}
@@ -1733,7 +1813,7 @@ const APP_HTML = String.raw`<!doctype html>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>
-  <footer class="site-footer">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.</footer>
+  <footer class="site-footer"><div id="orgFooter"></div>Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks. All rights reserved.</footer>
   <div id="lightbox" class="lightbox hidden" onclick="this.classList.add('hidden')"></div>
 
   <script>
@@ -1759,8 +1839,18 @@ const APP_HTML = String.raw`<!doctype html>
     document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
     if(CONFIG.platform) ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
     else ME = await api('/api/auth/me').catch(()=>({role:null}));
+    renderOrgFooter();
     renderNav();
     route();
+  }
+  function renderOrgFooter(){
+    const el = document.getElementById('orgFooter'); if(!el) return;
+    const org = CONFIG.tenant && CONFIG.tenant.organizer;
+    if(!org || !org.name){ el.innerHTML=''; return; }
+    const sub = CONFIG.tenant.subdomain;
+    const logo = org.hasLogo ? '<img src="/org-logo/'+esc(sub)+'" alt="" class="org-foot-logo">' : '';
+    const name = org.url ? '<a href="'+esc(org.url)+'" target="_blank" rel="noopener">'+esc(org.name)+'</a>' : esc(org.name);
+    el.innerHTML = '<div class="org-foot">'+logo+'<span>'+t('主办方','Organized by')+': '+name+'</span></div>';
   }
 
   function renderNav(){
@@ -1770,6 +1860,7 @@ const APP_HTML = String.raw`<!doctype html>
              + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
       if(ME_USER.email){
         hp += '<button onclick="go(\'/dashboard\')">'+t('我的黑客松','My hackathons')+'</button>'
+            + '<button class="ghost" onclick="go(\'/settings\')">'+t('我的设置','Settings')+'</button>'
             + '<span class="who">'+esc(ME_USER.email)+'</span>'
             + '<button class="ghost" onclick="userLogout()">'+t('退出','Logout')+'</button>';
       } else {
@@ -1806,6 +1897,7 @@ const APP_HTML = String.raw`<!doctype html>
       if(p === '/about') return renderAbout();
       if(p === '/guide') return renderGuide();
       if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
+      if(p === '/settings') return ME_USER.email ? renderSettings() : renderPlatformLogin();
       return renderPlatformLanding();
     }
     if(p === '/' || p === '') return renderWall();
@@ -2010,6 +2102,54 @@ const APP_HTML = String.raw`<!doctype html>
     });
   }
 
+  // 180×180 PNG, transparency preserved, contained + centered.
+  function compressLogo(file){
+    return new Promise(function(resolve,reject){
+      if(!file.type.startsWith('image/')) return reject(new Error(t('请选择图片文件','Pick an image')));
+      const img=new Image(); const url=URL.createObjectURL(file);
+      img.onload=function(){
+        const S=180; const c=document.createElement('canvas'); c.width=S; c.height=S;
+        const x=c.getContext('2d');
+        const scale=Math.min(S/img.width,S/img.height); const w=Math.round(img.width*scale), h=Math.round(img.height*scale);
+        x.drawImage(img,Math.round((S-w)/2),Math.round((S-h)/2),w,h); URL.revokeObjectURL(url);
+        const out=c.toDataURL('image/png');
+        if(out.length>120000) return reject(new Error(t('图片太复杂,换一张更简单的 Logo','Too complex — use a simpler logo')));
+        resolve(out);
+      };
+      img.onerror=function(){ URL.revokeObjectURL(url); reject(new Error(t('无法读取图片','Cannot read image'))); };
+      img.src=url;
+    });
+  }
+  async function renderSettings(){
+    app.innerHTML='<h1>'+t('我的设置 · 组织资料','Settings · Organization')+'</h1>'
+      +'<p class="muted">'+t('你的主办方身份,会显示在你创建的每个黑客松页面底部(主办方:…),跨所有活动复用。','Your host identity — shown in the footer of every hackathon you create, reused across all your events.')+'</p>'
+      +'<div class="panel" style="max-width:560px"><div id="orgForm" class="muted">'+t('加载中…','Loading…')+'</div></div>';
+    let cur; try{ cur=await api('/api/platform/org'); }catch(e){ cur={}; }
+    window.__orgLogo = cur.orgLogo || '';
+    $('#orgForm').innerHTML=
+       '<label>'+t('组织名称','Organization name')+'</label><input id="orgName" maxlength="80" value="'+esc(cur.orgName||'')+'">'
+      +'<label>'+t('组织简介','About')+'</label><textarea id="orgIntro" maxlength="500">'+esc(cur.orgIntro||'')+'</textarea>'
+      +'<label>'+t('组织网址','Website')+'</label><input id="orgUrl" maxlength="200" placeholder="https://" value="'+esc(cur.orgUrl||'')+'">'
+      +'<label>'+t('对外联系方式','Contact')+'</label><input id="orgContact" maxlength="120" placeholder="'+t('邮箱 / 微信 / Telegram','email / WeChat / Telegram')+'" value="'+esc(cur.orgContact||'')+'">'
+      +'<label>Logo <span class="muted">('+t('PNG 透明,自动裁为 180×180','transparent PNG, resized to 180×180')+')</span></label>'
+      +'<div class="row" style="align-items:center;gap:12px"><div id="orgLogoPrev" class="orglogo-prev"></div><input id="orgLogoFile" type="file" accept="image/*"><button class="ghost" id="orgLogoClear">'+t('移除','Remove')+'</button></div>'
+      +'<div class="row" style="margin-top:16px"><button id="orgSave">'+t('保存','Save')+'</button></div><div id="orgMsg"></div>';
+    function drawLogo(){ $('#orgLogoPrev').innerHTML = window.__orgLogo ? '<img src="'+window.__orgLogo+'" alt="logo">' : '<span class="muted" style="font-size:12px">'+t('无','none')+'</span>'; }
+    drawLogo();
+    $('#orgLogoFile').addEventListener('change', async function(ev){
+      const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
+      try{ window.__orgLogo=await compressLogo(f); drawLogo(); setMsg('orgMsg',t('Logo 已就绪,记得点保存','Logo ready — remember to Save')); }
+      catch(e){ setMsg('orgMsg',e.message,true); }
+    });
+    $('#orgLogoClear').addEventListener('click',function(){ window.__orgLogo=''; drawLogo(); });
+    $('#orgSave').addEventListener('click', async function(){
+      $('#orgSave').disabled=true;
+      try{ await api('/api/platform/org',{method:'POST',body:{orgName:$('#orgName').value.trim(),orgIntro:$('#orgIntro').value.trim(),orgUrl:$('#orgUrl').value.trim(),orgContact:$('#orgContact').value.trim(),orgLogo:window.__orgLogo}});
+        setMsg('orgMsg',t('已保存 ✓','Saved ✓')); }
+      catch(e){ setMsg('orgMsg',e.message,true); }
+      $('#orgSave').disabled=false;
+    });
+  }
   async function renderDashboard(){
     if(!ME_USER.email){ go('/start'); return; }
     ME_USER = await api('/api/platform/me').catch(()=>ME_USER);
