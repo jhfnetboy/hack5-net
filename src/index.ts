@@ -1613,7 +1613,7 @@ const APP_HTML = String.raw`<!doctype html>
           + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
     if(ME.role){
       h += '<button class="ghost" onclick="go(\'/leaderboard\')">'+t('排行榜','Leaderboard')+'</button>'
-         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/manage\')">'+t('首页','Homepage')+'</button><button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
+         + (ME.role==='admin'?'<button class="ghost" onclick="go(\'/manage\')">'+t('首页','Homepage')+'</button><button class="ghost" onclick="go(\'/poster\')">'+t('海报','Poster')+'</button><button class="ghost" onclick="go(\'/invites\')">'+t('邀请码','Invites')+'</button><button class="ghost" onclick="go(\'/judges\')">'+t('评委','Judges')+'</button>':'')
          + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?t('管理','Admin'):t('评委','Judge'))+'</span>'
          + '<button onclick="logout()">'+t('退出','Logout')+'</button>';
     } else {
@@ -1647,6 +1647,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(p === '/judges') return renderJudges();
     if(p === '/manage') return renderTenantEdit();
     if(p === '/photos') return renderPhotos();
+    if(p === '/poster') return renderPoster();
     if((m = p.match(/^\/p\/([^/]+)$/))) return renderDetail(m[1]);
     if((m = p.match(/^\/watch\/([^/]+)/))) return renderDetail(m[1]);
     app.innerHTML = '<div class="panel"><p>'+t('页面不存在。','Page not found.')+'</p></div>';
@@ -2001,6 +2002,58 @@ const APP_HTML = String.raw`<!doctype html>
       };
       img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error(t('无法读取','Cannot read'))); };
       img.src=url;
+    });
+  }
+
+  // ---------------- promo poster (free A4) ----------------
+  function wrapText(str, per, maxLines){
+    str = String(str||''); const lines=[];
+    if(/\s/.test(str)){
+      let cur=''; for(const w of str.split(/\s+/)){ if((cur+' '+w).trim().length>per){ if(cur){lines.push(cur);} cur=w; } else { cur=(cur+' '+w).trim(); } if(lines.length>=maxLines) break; }
+      if(cur && lines.length<maxLines) lines.push(cur);
+    } else { for(let i=0;i<str.length && lines.length<maxLines;i+=per) lines.push(str.slice(i,i+per)); }
+    return lines;
+  }
+  function posterSvg(){
+    const tn = CONFIG.tenant || {};
+    const name = tn.name || 'Hackathon';
+    const nameLines = wrapText(name, name.length>16?14:10, 3);
+    const nameFs = nameLines.length>=3?56:(name.length>14?66:84);
+    const introLines = wrapText(String(tn.intro||'').replace(/\s+/g,' ').slice(0,72), 30, 2);
+    const bits=[]; if(tn.eventTime)bits.push(['📅',tn.eventTime]); if(tn.location)bits.push(['📍',tn.location]); if(tn.address)bits.push(['📮',tn.address]);
+    const sub = tn.subdomain||'';
+    let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 794 1123" width="100%" style="display:block">'
+      + '<rect width="794" height="1123" fill="#0a0e0a"/>'
+      + '<g fill="#25ff86" opacity="0.06" font-family="monospace" font-size="16">'+[0,60,120,680,740].map(x=>'<text x="'+x+'"><tspan x="'+x+'" dy="22">1010</tspan><tspan x="'+x+'" dy="22">0110</tspan><tspan x="'+x+'" dy="22">1101</tspan><tspan x="'+x+'" dy="22">0011</tspan></text>').join('')+'</g>'
+      + '<g transform="translate(60,72)"><rect width="56" height="56" rx="14" fill="#141a16"/><text x="28" y="38" text-anchor="middle" font-family="ui-monospace,monospace" font-size="24" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text></g>'
+      + '<text x="132" y="110" font-family="ui-monospace,monospace" font-size="30" font-weight="800" fill="#ffffff">hack5</text>'
+      + '<text x="734" y="106" text-anchor="end" font-family="monospace" font-size="15" fill="#25ff86" letter-spacing="3">HACKATHON</text>'
+      + '<line x1="60" y1="150" x2="734" y2="150" stroke="#1c2620" stroke-width="2"/>';
+    let y=290;
+    nameLines.forEach((ln,i)=>{ svg+='<text x="60" y="'+(y+i*(nameFs+6))+'" font-family="Inter,-apple-system,sans-serif" font-size="'+nameFs+'" font-weight="800" fill="#ffffff">'+esc(ln)+'</text>'; });
+    y = 290 + nameLines.length*(nameFs+6) + 24;
+    introLines.forEach((ln,i)=>{ svg+='<text x="60" y="'+(y+i*34)+'" font-family="-apple-system,sans-serif" font-size="25" fill="#8fb3a0">'+esc(ln)+'</text>'; });
+    y += introLines.length*34 + 66;
+    bits.forEach((b,i)=>{ svg+='<text x="60" y="'+(y+i*56)+'" font-family="-apple-system,sans-serif" font-size="27" fill="#e3ece7">'+b[0]+'  '+esc(String(b[1]).slice(0,38))+'</text>'; });
+    svg += '<rect x="60" y="978" width="674" height="92" rx="16" fill="#25ff86"/>'
+      + '<text x="397" y="1018" text-anchor="middle" font-family="-apple-system,sans-serif" font-size="24" font-weight="700" fill="#0a0e0a">'+t('提交作品 · 报名','Join &amp; submit at')+'</text>'
+      + '<text x="397" y="1050" text-anchor="middle" font-family="ui-monospace,monospace" font-size="26" font-weight="800" fill="#0a0e0a">'+esc(sub)+'.hack5.net</text>'
+      + '<text x="734" y="1102" text-anchor="end" font-family="monospace" font-size="13" fill="#3f8f63">Mycelium · Digital Public Goods · hack5.net</text>'
+      + '</svg>';
+    return svg;
+  }
+  function renderPoster(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    const svg = posterSvg(); window.__posterSvg = svg;
+    app.innerHTML = '<div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap"><h1>'+t('宣传海报','Promo poster')+'</h1>'
+      + '<div class="row"><button id="dlPng">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg">'+t('下载 SVG','Download SVG')+'</button></div></div>'
+      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。想要文字描述定制画风的 AI 海报?付费版即将上线。','A4 portrait, auto-built from your homepage info. Want an AI art-style poster from a text prompt? Premium version coming soon.')+'</p>'
+      + '<div style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)">'+svg+'</div>';
+    $('#dlSvg').addEventListener('click', ()=>{ const b=new Blob([window.__posterSvg],{type:'image/svg+xml'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download='hack5-poster.svg'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); });
+    $('#dlPng').addEventListener('click', ()=>{
+      const img=new Image(); const url=URL.createObjectURL(new Blob([window.__posterSvg],{type:'image/svg+xml;charset=utf-8'}));
+      img.onload=()=>{ const c=document.createElement('canvas'); c.width=1588; c.height=2246; const x=c.getContext('2d'); x.drawImage(img,0,0,1588,2246); URL.revokeObjectURL(url); c.toBlob(bl=>{ if(!bl){alert(t('导出失败','Export failed'));return;} const u=URL.createObjectURL(bl); const a=document.createElement('a'); a.href=u; a.download='hack5-poster.png'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); },'image/png'); };
+      img.onerror=()=>alert(t('导出失败','Export failed')); img.src=url;
     });
   }
 
