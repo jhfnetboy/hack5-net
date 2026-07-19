@@ -1,17 +1,34 @@
-<p align="center"><img src="docs/logo.png" width="360" alt="hack5 — built for hackathons"></p>
+<p align="center"><img src="assets/og.png" width="720" alt="hack5 — 10 分钟发起你的黑客松 / Launch your own hackathon in 10 minutes"></p>
 
 <h1 align="center">hack5</h1>
 
-<p align="center">黑客松作品提交与展示平台 · A hackathon submission & showcase portal</p>
+<p align="center"><b>10 分钟,发起并部署属于你自己的黑客松站点。</b><br>Launch your own hackathon site in 10 minutes.</p>
 
-选手提交一个 **GitHub 仓库 + 演示视频链接 + 产品截图**,官网自动抓取 GitHub 信息生成作品卡,评委在线打分。Each team submits a **GitHub repo + a demo-video link + product screenshots**; the site auto-fetches GitHub info into a card and judges score online.
+<p align="center">
+报名 · 作品墙 · 评审打分 · 海报 · 组队 · 一键转发<br>
+开源公共物品(<a href="https://blog.mushroom.cv/">Mycelium · Digital Public Goods</a>)· <b>第一场免费</b>
+</p>
 
-**Live / 线上:** <https://hack5.net>
+<p align="center"><b>Live / 线上:</b> <a href="https://hack5.net">hack5.net</a> · <b>Demo:</b> <a href="https://demo.hack5.net">demo.hack5.net</a></p>
 
-![HackVideo 作品详情页 / project detail page](docs/screenshot-detail.jpg)
+多租户单站架构:每个黑客松是一个独立子域名(`<name>.hack5.net`),数据隔离,共享一套平台。主办邮箱登录即可创建,自动开通子域名。A single multi-tenant Worker: each hackathon is its own subdomain with isolated data; organizers create one by email login and the subdomain is provisioned automatically.
 
-> 作品详情页:内嵌演示视频、GitHub 信息、README、截图与评委打分。
-> A project page — embedded demo video, GitHub info, README, screenshots and judge scoring.
+---
+
+## 海报 / Posters
+
+每个黑客松都能一键生成 A4 宣传海报,自动填入名称、时间、地点与报名链接。**免费版**为固定模板;**付费版**用一句话描述画风,AI(OpenAI `gpt-image-1`)生成背景,活动文字仍清晰叠加。Every hackathon can generate an A4 promo poster auto-filled from its homepage. The **free** version is a fixed template; the **premium** version paints an AI background from a text prompt (`gpt-image-1`) with crisp text kept on top.
+
+<table>
+<tr>
+<td align="center"><b>免费版 / Free</b></td>
+<td align="center"><b>付费版 · AI / Premium · AI</b></td>
+</tr>
+<tr>
+<td><img src="assets/poster-free.png" width="360" alt="free A4 poster"></td>
+<td><img src="assets/poster-ai.png" width="360" alt="AI poster"></td>
+</tr>
+</table>
 
 ---
 

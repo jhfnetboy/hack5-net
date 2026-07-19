@@ -1,3 +1,5 @@
+import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
+
 interface Env {
   DB: D1Database;
   SHOTS: KVNamespace;
@@ -55,6 +57,15 @@ export default {
       if (url.hostname.toLowerCase() === "www.hack5.net") {
         return Response.redirect(`https://hack5.net${path}${url.search}`, 301);
       }
+
+      // ---- brand assets (static, tenant-independent) ----
+      if (method === "GET" && (path === "/favicon.svg" || path === "/favicon.ico")) {
+        return new Response(FAVICON_SVG, {
+          headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" },
+        });
+      }
+      if (method === "GET" && path === "/og.png") return imageBytes(OG_PNG_B64, "image/png");
+      if (method === "GET" && path === "/apple-touch-icon.png") return imageBytes(APPLE_ICON_B64, "image/png");
 
       // Resolve the tenant (hackathon) for this request from the Host.
       const tctx = await resolveTenant(request, env);
@@ -1640,6 +1651,16 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
   });
 }
 
+// Decode a base64-embedded brand asset into a cacheable binary Response.
+function imageBytes(b64: string, contentType: string): Response {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, {
+    headers: { "Content-Type": contentType, "Cache-Control": "public, max-age=604800" },
+  });
+}
+
 function html(body: string): Response {
   return new Response(body, {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Robots-Tag": "noindex" },
@@ -1663,8 +1684,22 @@ const APP_HTML = String.raw`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex,nofollow">
-  <title>HackVideo</title>
+  <title>hack5 · 10 分钟发起你的黑客松</title>
+  <meta name="description" content="hack5 — 10 分钟发起并部署属于你自己的黑客松站点:报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="hack5">
+  <meta property="og:title" content="hack5 · 10 分钟发起你的黑客松">
+  <meta property="og:description" content="报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。Launch your own hackathon in 10 minutes.">
+  <meta property="og:image" content="https://hack5.net/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:url" content="https://hack5.net">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="hack5 · 10 分钟发起你的黑客松">
+  <meta name="twitter:description" content="报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
+  <meta name="twitter:image" content="https://hack5.net/og.png">
   <style>
     :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--ink:#14161c;--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10)}
     *{box-sizing:border-box}

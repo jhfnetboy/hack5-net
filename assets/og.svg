@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <rect width="1200" height="630" fill="#0a0e0a"/>
+  <g fill="#25ff86" opacity="0.06" font-family="monospace" font-size="18">
+    <text x="60"><tspan x="60" dy="30">10110</tspan><tspan x="60" dy="30">01101</tspan><tspan x="60" dy="30">11010</tspan><tspan x="60" dy="30">00110</tspan></text>
+    <text x="1060"><tspan x="1060" dy="30">10110</tspan><tspan x="1060" dy="30">01101</tspan><tspan x="1060" dy="30">11010</tspan><tspan x="1060" dy="30">00110</tspan></text>
+  </g>
+  <g transform="translate(80,86)">
+    <rect width="76" height="76" rx="18" fill="#141a16"/>
+    <text x="38" y="52" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="34" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text>
+  </g>
+  <text x="176" y="138" font-family="ui-monospace,Menlo,monospace" font-size="46" font-weight="800" fill="#ffffff">hack5</text>
+  <text x="1120" y="132" text-anchor="end" font-family="monospace" font-size="20" fill="#25ff86" letter-spacing="5">HACKATHON PLATFORM</text>
+  <text x="80" y="322" font-family="Inter,-apple-system,sans-serif" font-size="86" font-weight="800" fill="#ffffff">10 分钟,发起你的黑客松</text>
+  <text x="80" y="392" font-family="-apple-system,sans-serif" font-size="38" fill="#8fb3a0">Launch your own hackathon site in 10 minutes</text>
+  <text x="80" y="452" font-family="-apple-system,sans-serif" font-size="30" fill="#5f7a6c">报名 · 作品墙 · 评审打分 · 海报 · 组队 · 一键转发</text>
+  <rect x="80" y="516" width="330" height="66" rx="14" fill="#25ff86"/>
+  <text x="245" y="558" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="30" font-weight="800" fill="#0a0e0a">hack5.net</text>
+  <text x="1120" y="562" text-anchor="end" font-family="monospace" font-size="19" fill="#3f8f63">Mycelium · Digital Public Goods</text>
+</svg>
