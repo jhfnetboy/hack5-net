@@ -467,9 +467,10 @@ async function platformLoginRequest(request: Request, env: Env): Promise<Respons
     .run();
   const sent = await sendEmailCode(env, email, code);
   if (!sent) {
-    // No email provider: surface the code ONLY on dev/preview hosts, never on the real product domain.
+    // Email not configured OR the provider failed: surface the code ONLY on dev/preview hosts,
+    // never on the real product domain. In prod, degrade gracefully (503) instead of crashing (500).
     if (isDevHost(request)) return json({ ok: true, debugCode: code });
-    return json({ error: "邮件服务暂未配置 / Email not configured" }, 503);
+    return json({ error: "验证码发送失败,请稍后重试 / Could not send the code, please try again" }, 503);
   }
   return json({ ok: true });
 }
@@ -616,11 +617,18 @@ async function sendHackathonReadyEmail(env: Env, email: string, name: string, ur
     `<tr><td align="center" style="padding:18px 0 8px"><a href="${url}" style="display:inline-block;background:#5b4be6;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 22px;border-radius:9px">🚀 进入你的黑客松 →</a></td></tr>` +
     `<tr><td align="center" style="color:#9aa1ac;font-size:12px;line-height:1.7;padding-top:14px">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks</td></tr>` +
     `</table></td></tr></table></div>`;
-  await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 你的黑客松「${name}」已就绪`, text, html }),
-  });
+  // Best-effort: the admin password is also shown on-screen, so a mail failure must not break
+  // (or roll back) hackathon creation. Log and move on.
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 你的黑客松「${name}」已就绪`, text, html }),
+    });
+    if (!res.ok) console.log("ready-email send failed", res.status, (await res.text().catch(() => "")).slice(0, 200));
+  } catch (err) {
+    console.log("ready-email fetch error", String(err));
+  }
 }
 
 // Create a proxied CNAME <sub>.hack5.net -> hack5.net so the wildcard Worker route serves it.
@@ -662,13 +670,23 @@ async function sendEmailCode(env: Env, email: string, code: string): Promise<boo
     `<tr><td align="center" style="color:#9aa1ac;font-size:12px;line-height:1.7;padding-top:16px">Mycelium: Digital Public Goods 🚌 = 🪵 Infras | 🦠 Protocols | 🕸️ Networks</td></tr>` +
     `</table></td></tr></table></div>`;
   if (env.RESEND_API_KEY) {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: "‹5› hack5 登录验证码 · 10 分钟发起你的黑客松", text, html }),
-    });
-    if (!res.ok) throw new Error(`email send failed: ${res.status}`);
-    return true;
+    // Never throw: a provider error (e.g. rate limit, invalid recipient) must degrade to the
+    // caller's graceful path (debugCode on dev / "try again" in prod), not crash login with a 500.
+    try {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: "‹5› hack5 登录验证码 · 10 分钟发起你的黑客松", text, html }),
+      });
+      if (!res.ok) {
+        console.log("resend send failed", res.status, (await res.text().catch(() => "")).slice(0, 200));
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.log("resend fetch error", String(err));
+      return false;
+    }
   }
   if (env.DEV_MODE === "true") console.log(`hack5 login code for ${email}: ${code}`);
   return false; // no provider -> caller returns debugCode
