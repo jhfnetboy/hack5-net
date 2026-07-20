@@ -2372,6 +2372,16 @@ const APP_HTML = String.raw`<!doctype html>
     .likebtn{background:var(--ghost-bg);border:1px solid var(--line);color:var(--danger);border-radius:999px;padding:5px 14px;font-weight:700;font-size:14px;cursor:pointer}
     .likebtn:hover{background:var(--ghost-hover)}
     .likebtn.liked{background:var(--danger);color:#fff;border-color:var(--danger)}
+    .price-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;max-width:760px;margin:24px auto 0;text-align:left}
+    @media(max-width:680px){.price-grid{grid-template-columns:1fr}}
+    .price-card{border:1px solid var(--line);border-radius:16px;padding:26px;background:var(--card);box-shadow:var(--shadow);display:flex;flex-direction:column;gap:8px}
+    .price-card .pc-ico{font-size:32px}
+    .price-card h2{margin:2px 0 0}
+    .price-card .pc-tag{color:var(--brand);font-weight:700;font-size:13px}
+    .price-card p{margin:6px 0;font-size:14px;color:var(--ink2)}
+    .price-card .pc-list{margin:4px 0 8px;padding-left:18px;color:var(--ink2);font-size:14px;line-height:1.9}
+    .price-card .pc-price{margin-top:auto;padding-top:10px;font-size:15px}
+    .price-card .pc-btn{margin-top:12px;width:100%;font-size:15px;padding:11px}
     .entry-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:940px;margin:26px auto 0;text-align:left}
     @media(max-width:760px){.entry-grid{grid-template-columns:1fr}}
     .entry-card{border:1px solid var(--line);border-radius:16px;padding:22px;background:var(--card);box-shadow:var(--shadow);cursor:pointer;transition:transform .12s,border-color .12s;display:flex;flex-direction:column;gap:6px}
@@ -2524,6 +2534,7 @@ const APP_HTML = String.raw`<!doctype html>
     const n = document.getElementById('nav');
     if(CONFIG.platform){
       let hp = '<button class="ghost" onclick="go(\'/guide\')">'+t('指南','Guide')+'</button>'
+             + '<button class="ghost" onclick="go(\'/pricing\')">'+t('价格','Pricing')+'</button>'
              + '<button class="ghost" onclick="go(\'/media\')">'+t('媒体','Media')+'</button>'
              + '<button class="ghost" onclick="go(\'/about\')">'+t('关于','About')+'</button>';
       if(ME_USER.email){
@@ -2567,6 +2578,7 @@ const APP_HTML = String.raw`<!doctype html>
       if(p === '/about') return renderAbout();
       if(p === '/guide') return renderGuide();
       if(p === '/media') return renderMedia();
+      if(p === '/pricing') return renderPricing();
       if(p === '/start' || p === '/dashboard') return ME_USER.email ? renderDashboard() : renderPlatformLogin();
       if(p === '/settings') return ME_USER.email ? renderSettings() : renderPlatformLogin();
       return renderPlatformLanding();
@@ -2704,6 +2716,31 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   // ---------------- about ----------------
+  function renderPricing(){
+    app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('购买 / 充值','Pricing')+'</h1>'
+      + '<p class="guide-sub">'+t('常规黑客松首场免费;Mini 与企业私密为付费产品。','Regular is free for your first event; Mini and Enterprise are paid.')+'</p></div>'
+      + '<div class="price-grid">'
+      // Mini — recharge / pay-per-use
+      + '<div class="price-card"><div class="pc-ico">✨</div><h2>'+t('Mini 黑客松','Mini')+'</h2>'
+      + '<div class="pc-tag">'+t('充值制 · 按用量','Top-up · pay as you go')+'</div>'
+      + '<p>'+t('面向非开发者:AI 帮你把想法做成能跑的应用。每建一个应用都会消耗 AI token,所以按充值使用。','For non-coders: AI turns your idea into a working app. Building each app consumes AI tokens, so it runs on top-ups.')+'</p>'
+      + '<ul class="pc-list"><li>'+t('每人首场免费','First event free per person')+'</li><li>'+t('之后按 token 充值继续','Then top up to keep going')+'</li><li>'+t('可由赞助商代付','A sponsor can pay for you')+'</li></ul>'
+      + '<div class="pc-price"><b>'+t('充值包','Top-up')+'</b> <span class="muted">¥50 / ¥100 / ¥200</span></div>'
+      + '<button class="pc-btn" data-plan="mini">'+t('充值','Top up')+'</button></div>'
+      // Enterprise secret — direct purchase
+      + '<div class="price-card"><div class="pc-ico">🔒</div><h2>'+t('企业私密黑客松','Enterprise')+'</h2>'
+      + '<div class="pc-tag">'+t('直接购买 · 按场','Buy directly · per event')+'</div>'
+      + '<p>'+t('邀请制、访问码门禁、不公开源码、Demo 评审。适合企业内部赛与命题赛。','Invite-only, access-gated, no source exposed, demo review. For internal & themed enterprise events.')+'</p>'
+      + '<ul class="pc-list"><li>'+t('访问码门禁 + 会话时效','Access gate + timed sessions')+'</li><li>'+t('评委作为协作者评估私有代码','Judges review private code as collaborators')+'</li><li>'+t('一口价,按场购买','Flat price, per event')+'</li></ul>'
+      + '<div class="pc-price"><b>'+t('按场','Per event')+'</b> <span class="muted">'+t('购买后即用','buy & go')+'</span></div>'
+      + '<button class="pc-btn" data-plan="secret">'+t('购买','Buy')+'</button></div>'
+      + '</div>'
+      + '<p class="muted" style="text-align:center;margin-top:20px;font-size:13px">'+t('支付通道即将上线。现在需要开通请联系我们。','Payment is coming soon — contact us to get set up now.')+'</p>'
+      + '</div>';
+    app.querySelectorAll('.pc-btn').forEach(b=>b.addEventListener('click',()=>{
+      alert(t('支付通道即将上线,我们会尽快开通。可先联系 Mycelium 团队。','Payment is coming soon. Please contact the Mycelium team to get set up.'));
+    }));
+  }
   function renderMedia(){
     const rows = MEDIA.map(m=>'<tr><td><b>'+esc(m.platform)+'</b>'+(m.handle?'<div class="muted" style="font-size:12px">'+esc(m.handle)+'</div>':'')+'</td>'
       +'<td>'+(m.followers?esc(m.followers):'<span class="muted">'+t('更新中','TBA')+'</span>')+'</td>'
@@ -2921,10 +2958,10 @@ const APP_HTML = String.raw`<!doctype html>
           ME_USER = await api('/api/platform/me'); renderNav();
           let n=5; const go=document.getElementById('pwGo');
           const timer=setInterval(()=>{ n--; if(n<=0){ clearInterval(timer); location.href=r.url; } else if(go){ go.textContent=n+t(' 秒后自动进入你的黑客松站点…',' s — taking you to your hackathon site…'); } },1000);
-        } catch(e){ setMsg('hMsg', e.message, true); $('#hCreate').disabled=false; }
+        } catch(e){ if(e.data && e.data.upgrade){ setMsg('hMsg', e.message+' →', true); setTimeout(()=>go('/pricing'), 900); return; } setMsg('hMsg', e.message, true); $('#hCreate').disabled=false; }
       });
     } else {
-      $('#hUpgrade').addEventListener('click', ()=>alert(t('支付功能即将上线,先联系主办方开通。','Payment coming soon — contact us to upgrade.')));
+      $('#hUpgrade').addEventListener('click', ()=>go('/pricing'));
     }
   }
 
@@ -3849,7 +3886,7 @@ const APP_HTML = String.raw`<!doctype html>
   async function api(path,opts={}){
     const res = await fetch(path,{method:opts.method||'GET',headers:opts.body?{'Content-Type':'application/json'}:{},body:opts.body?JSON.stringify(opts.body):undefined,credentials:'same-origin'});
     const data = await res.json().catch(()=>({}));
-    if(!res.ok) throw new Error(data.error||(t('请求失败 ','Request failed ')+res.status));
+    if(!res.ok){ const err = new Error(data.error||(t('请求失败 ','Request failed ')+res.status)); err.status = res.status; err.data = data; throw err; }
     return data;
   }
   </script>

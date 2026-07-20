@@ -128,6 +128,11 @@ ALTER TABLE submissions ADD COLUMN link_url TEXT;   -- mini:任意作品链接(n
 > 每个参赛者(开发者)**按名字开一个实例**,拿到**专属 URL、互不干扰**,进入即可开始开发。
 > 该参赛者与 WorkBench 的**全部对话内容 + 生成的规格文档 + loop-engineer 产出的代码**,
 > **全部自动提交到一个新建的 GitHub 仓库**——仓库名由参赛者命名,建在**我方提供 PAT 的专用 GitHub 账户**下。
+>
+> **重要区分(已确认)**:
+> - **Mini**:由**我方 PAT 账户建「公有」仓库**(不是私有),每个参赛者一个,帮非开发者把想法做成应用。
+> - **企业私密(secret)**:参赛者用**自己账号下的私有仓库**,与我方无关(填 repo URL + 加评委为协作者,已实现)。我方**只**为 Mini 建仓。
+> - PAT 需 **Repository access = All repositories** + Administration/Contents 写权限(实测建公有仓+推子目录文件均通过)。
 
 拆成对 WorkBench 的具体要求:
 - (a) **per-participant 实例/会话隔离**:按参赛者 slug 开 `clients/<hackathon>/projects/<participant>/`(fde-copilot 已有目录隔离),每人一个可访问 URL,鉴权 token 按参赛者作用域。
