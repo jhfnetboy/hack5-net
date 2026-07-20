@@ -149,7 +149,7 @@ export default {
       const hideMatch = path.match(/^\/api\/submissions\/([^/]+)\/hide$/);
       if (hideMatch && method === "POST") return hideSubmission(request, env, tid, hideMatch[1]);
       const likeMatch = path.match(/^\/api\/submissions\/([^/]+)\/like$/);
-      if (likeMatch && method === "POST") return likeSubmission(request, env, tid, likeMatch[1]);
+      if (likeMatch && method === "POST") return likeSubmission(request, env, tenant, tid, likeMatch[1]);
       if (path === "/api/tenant/mini/assist" && method === "POST") return miniAssist(request, env, tenant, tid);
 
       // ---- screenshots (KV, content-addressed by submission uuid) ----
@@ -679,8 +679,19 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
     .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, finalIntro, mode, accessDays, now, now)
     .run();
 
-  // Close the quota race deterministically for regular/secret (mini uses its own upfront cap).
-  if (mode !== "mini") {
+  // Close the quota race deterministically: recount after insert and roll back if a concurrent
+  // create pushed this one past the limit (regular/secret share the quota; mini has its own free=1).
+  if (mode === "mini") {
+    const mine = await env.DB.prepare(
+      "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode = 'mini' ORDER BY created_at ASC, id ASC",
+    )
+      .bind(user.email)
+      .all<{ id: string }>();
+    if (mine.results.findIndex((r) => r.id === id) >= 1) {
+      await env.DB.prepare("DELETE FROM tenants WHERE id = ?").bind(id).run();
+      return json({ error: "mini 免费额度已用完(每人 1 场)。充值或由赞助商代付后可继续 / Free mini used", upgrade: true }, 402);
+    }
+  } else {
     const owned = await env.DB.prepare(
       "SELECT id FROM tenants WHERE owner_email = ? AND status = 'active' AND mode != 'mini' ORDER BY created_at ASC, id ASC",
     )
@@ -1314,17 +1325,20 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean,
   };
 }
 
-// Like a submission (mini judging). Deduped per liker (hashed IP) so a browser can't inflate it.
-async function likeSubmission(request: Request, env: Env, tid: string | null, id: string): Promise<Response> {
-  if (!tid) return json({ error: "Not found" }, 404);
+// Like a submission (mini judging only). Deduped per liker (hashed IP) so a browser can't inflate it.
+async function likeSubmission(request: Request, env: Env, tenant: Tenant | null, tid: string | null, id: string): Promise<Response> {
+  if (!tid || tenant?.mode !== "mini") return json({ error: "Not found" }, 404);
   const ip = request.headers.get("cf-connecting-ip") ?? "local";
   const liker = await hmacHex(utf8(env.AUTH_SECRET), `like:${ip}`);
   const ins = await env.DB.prepare("INSERT OR IGNORE INTO submission_likes (submission_id, liker, created_at) VALUES (?, ?, ?)")
     .bind(id, liker, unixNow())
     .run();
-  if (ins.meta.changes === 1) {
-    await env.DB.prepare("UPDATE submissions SET likes = likes + 1 WHERE id = ? AND tenant_id = ?").bind(id, tid).run();
-  }
+  // Derive the counter from the dedup table so it can never drift (self-healing, no lost-update race).
+  await env.DB.prepare(
+    "UPDATE submissions SET likes = (SELECT COUNT(*) FROM submission_likes WHERE submission_id = ?) WHERE id = ? AND tenant_id = ?",
+  )
+    .bind(id, id, tid)
+    .run();
   const row = await env.DB.prepare("SELECT likes FROM submissions WHERE id = ? AND tenant_id = ?").bind(id, tid).first<{ likes: number }>();
   return json({ ok: true, likes: row?.likes ?? 0, liked: ins.meta.changes === 1 });
 }
