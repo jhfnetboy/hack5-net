@@ -1,5 +1,6 @@
 import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
+import { createWorkbench, workbenchMockEnabled } from "./workbench";
 
 interface Env {
   DB: D1Database;
@@ -33,6 +34,11 @@ interface Env {
   R2_SECRET_ACCESS_KEY?: string;
   OPENAI_API_KEY?: string; // premium: AI text-to-image poster (gpt-image-1)
   SIGNED_UPLOAD_EXPIRES_SECONDS?: string;
+  // ---- WorkBench (Mini × fde-copilot/loop-engineer) — contract §5 v2, CC-51 ----
+  WORKBENCH_BASE_URL?: string; // fde-copilot/loop-engineer base URL (unset → mock)
+  WORKBENCH_TOKEN?: string; // admin orchestration token (B3)
+  WORKBENCH_CALLBACK_SECRET?: string; // HMAC key to verify inbound W5 callbacks (C2)
+  WORKBENCH_MOCK?: string; // "1" forces offline mock data
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
@@ -151,6 +157,9 @@ export default {
       const likeMatch = path.match(/^\/api\/submissions\/([^/]+)\/like$/);
       if (likeMatch && method === "POST") return likeSubmission(request, env, tenant, tid, likeMatch[1]);
       if (path === "/api/tenant/mini/assist" && method === "POST") return miniAssist(request, env, tenant, tid);
+
+      // ---- WorkBench client smoke test (mock only; inert in production) ----
+      if (path === "/api/wb/selftest" && method === "GET") return wbSelftest(env);
 
       // ---- screenshots (KV, content-addressed by submission uuid) ----
       const shotMatch = path.match(/^\/shot\/([^/]+)\/(\d+)$/);
@@ -1378,6 +1387,41 @@ async function miniAssist(request: Request, env: Env, tenant: Tenant | null, tid
   const text = String(data?.choices?.[0]?.message?.content ?? "").trim().slice(0, 300);
   if (!text) return json({ error: "生成失败 / Failed" }, 502);
   return json({ ok: true, text });
+}
+
+// WorkBench client smoke test — exercises all 8 contract-v2 functions against the mock and
+// returns their shapes. Strictly gated on WORKBENCH_MOCK=1 so it is a no-op (404) in production;
+// it lets `wrangler dev` self-test the client module (A1) with no server. Not tenant-scoped.
+async function wbSelftest(env: Env): Promise<Response> {
+  if (env.WORKBENCH_MOCK !== "1") return json({ error: "Not found" }, 404);
+  const wb = createWorkbench(env);
+  const { client } = await wb.createClient({ name: "Demo Hackathon", background: "mini" });
+  const { project } = await wb.createProject(client.slug, { name: "邻里团购小工具", deliverableName: "app", deliverableType: "web" });
+  const chatShort = await wb.chat({ clientSlug: client.slug, projectSlug: project.slug, input: "帮小区做团购" });
+  const chatLong = await wb.chat({
+    clientSlug: client.slug,
+    projectSlug: project.slug,
+    input: "帮我小区做一个团购小工具:邻居可以发起团购、其他人一键跟团、到量自动通知团长联系供应商,手机上用,界面简单亲切,不要注册。",
+  });
+  const commit = await wb.commit({ clientSlug: client.slug, projectSlug: project.slug, push: true, repo: "https://github.com/hack5-mini-bot/demo.git" });
+  const { jobId } = await wb.plan({ clientSlug: client.slug, projectSlug: project.slug, repo: "https://github.com/hack5-mini-bot/demo.git" });
+  const run = await wb.run(jobId);
+  const status = await wb.status(jobId);
+  const usage = await wb.usage(client.slug);
+  return json({
+    ok: true,
+    mock: wb.mock,
+    workbenchMockEnabled: workbenchMockEnabled(env),
+    client,
+    project,
+    chatShort: chatShort.result.readiness,
+    chatLong: chatLong.result.readiness,
+    commit,
+    plan: { jobId },
+    run,
+    status,
+    usage,
+  });
 }
 
 // Mini-mode submission: no code required. Any work link (no-code app / site / doc / video) + a
