@@ -90,6 +90,10 @@ export default {
       const orgLogo = path.match(/^\/org-logo\/([a-z0-9-]+)$/);
       if (orgLogo && method === "GET") return serveOrgLogo(env, orgLogo[1]);
 
+      // ---- secret-mode access gate + judge roster ----
+      if (path === "/api/tenant/access" && method === "POST") return redeemAccess(request, env, tenant, tid);
+      if (path === "/api/tenant/judges/roster" && method === "GET") return judgeRoster(request, env, tenant, tid);
+
       // ---- tenant homepage (admin) ----
       if (path === "/api/tenant/homepage" && method === "POST") return updateHomepage(request, env, tenant);
 
@@ -124,10 +128,10 @@ export default {
       if (photoServe && method === "GET") return servePhoto(env, photoServe[1], photoServe[2]);
 
       // ---- submissions (tenant-scoped) ----
-      if (path === "/api/submissions" && method === "GET") return listSubmissions(env, tid);
-      if (path === "/api/submissions" && method === "POST") return createSubmission(request, env, tid);
+      if (path === "/api/submissions" && method === "GET") return listSubmissions(request, env, tenant, tid);
+      if (path === "/api/submissions" && method === "POST") return createSubmission(request, env, tenant, tid);
       const subMatch = path.match(/^\/api\/submissions\/([^/]+)$/);
-      if (subMatch && method === "GET") return getSubmission(request, env, tid, subMatch[1]);
+      if (subMatch && method === "GET") return getSubmission(request, env, tenant, tid, subMatch[1]);
       const lockMatch = path.match(/^\/api\/submissions\/([^/]+)\/lock$/);
       if (lockMatch && method === "POST") return lockSubmission(request, env, tid, lockMatch[1]);
       const hideMatch = path.match(/^\/api\/submissions\/([^/]+)\/hide$/);
@@ -191,6 +195,8 @@ type Tenant = {
   map_query?: string;
   agenda?: string;
   banner?: string;
+  mode?: string;
+  access_days?: number;
   org_name?: string;
   org_url?: string;
   org_has_logo?: number;
@@ -216,7 +222,7 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
   }
   if (!sub || sub === "www") return { platform: true, tenant: null };
   const tenant = await env.DB.prepare(
-    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.location, t.duration, t.address, t.map_query, t.agenda, t.banner,
+    `SELECT t.id, t.subdomain, t.name, t.admin_pass_hash, t.intro, t.event_time, t.location, t.duration, t.address, t.map_query, t.agenda, t.banner, t.mode, t.access_days,
        u.org_name AS org_name, u.org_url AS org_url,
        CASE WHEN u.org_logo IS NOT NULL AND u.org_logo <> '' THEN 1 ELSE 0 END AS org_has_logo
      FROM tenants t LEFT JOIN users u ON u.email = t.owner_email
@@ -230,6 +236,10 @@ async function resolveTenant(request: Request, env: Env): Promise<{ platform: bo
 
 async function getConfig(request: Request, env: Env): Promise<Response> {
   const tctx = await resolveTenant(request, env);
+  const mode = tctx.tenant?.mode === "secret" ? "secret" : "open";
+  // Secret tenants gate everything behind an access session: without it, expose only name + mode
+  // so the client can render the access-code page — never the intro/details/submissions.
+  const gated = mode === "secret" && !(await hasSecretAccess(request, env, tctx.tenant));
   return json({
     appName: env.APP_NAME || "hack5",
     country: request.cf?.country ?? null,
@@ -237,9 +247,13 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
     platform: tctx.platform,
     tenantNotFound: tctx.notFound ?? null,
     tenant: tctx.tenant
-      ? {
+      ? gated
+        ? { subdomain: tctx.tenant.subdomain, name: tctx.tenant.name, mode, gated: true }
+        : {
           subdomain: tctx.tenant.subdomain,
           name: tctx.tenant.name,
+          mode,
+          gated: false,
           intro: tctx.tenant.intro ?? "",
           eventTime: tctx.tenant.event_time ?? "",
           location: tctx.tenant.location ?? "",
@@ -320,6 +334,11 @@ async function signAuth(env: Env, payload: Auth): Promise<string> {
   return `${body}.${sig}`;
 }
 
+async function signAccessToken(env: Env, payload: { tenant: string; exp: number }): Promise<string> {
+  const body = b64urlEncode(JSON.stringify(payload));
+  return `${body}.${await hmacHex(utf8(env.AUTH_SECRET), body)}`;
+}
+
 async function getAuth(request: Request, env: Env, tid: string | null): Promise<Auth | null> {
   const raw = parseCookies(request.headers.get("cookie"))[AUTH_COOKIE];
   if (!raw) return null;
@@ -345,6 +364,35 @@ async function requireRole(request: Request, env: Env, tid: string | null, need:
   if (!auth) return null;
   if (need === "admin") return auth.role === "admin" ? auth : null;
   return auth; // judge or admin
+}
+
+// ---- secret-mode access gate ----
+const ACCESS_COOKIE = "hv_access";
+type Access = { tenant: string; exp: number };
+function accessCookie(request: Request, token: string, maxAge: number): string {
+  const secure = new URL(request.url).protocol === "https:" ? " Secure;" : "";
+  return `${ACCESS_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+async function getAccessSession(request: Request, env: Env, tid: string | null): Promise<boolean> {
+  const raw = parseCookies(request.headers.get("cookie"))[ACCESS_COOKIE];
+  if (!raw || !tid) return false;
+  const dot = raw.lastIndexOf(".");
+  if (dot <= 0) return false;
+  const body = raw.slice(0, dot);
+  if (!timingSafeEqual(raw.slice(dot + 1), await hmacHex(utf8(env.AUTH_SECRET), body))) return false;
+  try {
+    const p = JSON.parse(b64urlDecode(body)) as Access;
+    return typeof p.exp === "number" && p.exp >= unixNow() && p.tenant === tid;
+  } catch {
+    return false;
+  }
+}
+// A request "has access" to a secret tenant's content if: open mode, OR a valid access session,
+// OR an admin/judge session (they're already trusted).
+async function hasSecretAccess(request: Request, env: Env, tenant: Tenant | null): Promise<boolean> {
+  if (!tenant || tenant.mode !== "secret") return true;
+  if (await getAccessSession(request, env, tenant.id)) return true;
+  return Boolean(await getAuth(request, env, tenant.id));
 }
 
 // ============================ platform users (email login) ============================
@@ -552,10 +600,12 @@ function userCookie(request: Request, token: string, maxAge: number): string {
 async function createHackathon(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ error: "请先登录 / Please log in" }, 401);
-  const body = await request.json<{ name?: string; subdomain?: string; intro?: string; banner?: string }>().catch(() => null);
+  const body = await request.json<{ name?: string; subdomain?: string; intro?: string; banner?: string; mode?: string; accessDays?: number }>().catch(() => null);
   const name = String(body?.name ?? "").trim().slice(0, 60);
   const subdomain = String(body?.subdomain ?? "").trim().toLowerCase();
   const intro = String(body?.intro ?? "").trim().slice(0, 2000);
+  const mode = body?.mode === "secret" ? "secret" : "open";
+  const accessDays = mode === "secret" ? Math.min(90, Math.max(1, Math.floor(Number(body?.accessDays) || 7))) : 7;
   if (!name) return json({ error: "请填写黑客松名称 / Name required" }, 400);
   if (!/^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(subdomain)) {
     return json({ error: "子域名需 3-30 位小写字母/数字/连字符 / Invalid subdomain" }, 400);
@@ -589,9 +639,9 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   const now = unixNow();
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+    "INSERT INTO tenants (id, subdomain, name, admin_pass_hash, creator_email, owner_email, intro, mode, access_days, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
   )
-    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, intro, now, now)
+    .bind(id, subdomain, name, await hashSecret(env, adminPass), user.email, user.email, intro, mode, accessDays, now, now)
     .run();
 
   // Close the quota race deterministically: keep the earliest `quota` tenants; if a concurrent
@@ -844,6 +894,43 @@ async function exportRegistrations(request: Request, env: Env, tid: string | nul
       "Cache-Control": "no-store",
     },
   });
+}
+
+// ---- secret-mode access gate ----
+// Redeem a single-use access code (reuses invite_codes) into a time-boxed access session cookie.
+async function redeemAccess(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || !tid) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  if (tenant.mode !== "secret") return json({ ok: true, open: true });
+  const body = await request.json<{ code?: string }>().catch(() => null);
+  const code = String(body?.code ?? "").trim();
+  if (!code) return json({ error: "请输入访问码 / Access code required" }, 400);
+  const now = unixNow();
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const rlKey = `access-rl:${tid}:${ip}`;
+  const attempts = Number((await env.SHOTS.get(rlKey)) ?? "0");
+  if (attempts >= 10) return json({ error: "尝试过于频繁,请稍后再试 / Too many attempts" }, 429);
+  const consumed = await env.DB.prepare(
+    "UPDATE invite_codes SET used_by = 'access', used_at = ? WHERE code = ? AND tenant_id = ? AND used_by IS NULL",
+  )
+    .bind(now, code, tid)
+    .run();
+  if (consumed.meta.changes !== 1) {
+    await env.SHOTS.put(rlKey, String(attempts + 1), { expirationTtl: 3600 });
+    return json({ error: "访问码无效或已被使用 / Invalid or already used" }, 403);
+  }
+  const days = tenant.access_days && tenant.access_days > 0 ? tenant.access_days : 7;
+  const token = await signAccessToken(env, { tenant: tid, exp: now + days * 86400 });
+  return json({ ok: true, days }, 200, { "Set-Cookie": accessCookie(request, token, days * 86400) });
+}
+
+// Judge roster (name + GitHub, NO codes) so participants know who to add as private-repo collaborators.
+async function judgeRoster(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || !tid) return json({ error: "Not found" }, 404);
+  if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
+  const rows = await env.DB.prepare("SELECT name, github_user FROM judges WHERE tenant_id = ? ORDER BY created_at ASC")
+    .bind(tid)
+    .all<{ name: string; github_user: string | null }>();
+  return json({ judges: rows.results.map((r) => ({ name: r.name, github: r.github_user ?? "" })) });
 }
 
 // ---- team formation: "looking for teammates" board ----
@@ -1120,30 +1207,34 @@ async function deletePhoto(request: Request, env: Env, tenant: Tenant | null, id
 
 // ============================ submissions ============================
 
-async function listSubmissions(env: Env, tid: string | null): Promise<Response> {
+async function listSubmissions(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tid) return json({ submissions: [] });
+  // Secret tenants: the work list is gated (participants who passed the gate, judges, admin).
+  if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
+  const secret = tenant?.mode === "secret";
   const rows = await env.DB.prepare(
-    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE tenant_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 300",
+    "SELECT id, project_name, team_name, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url FROM submissions WHERE tenant_id = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 300",
   )
     .bind(tid)
     .all<Record<string, unknown>>();
-  return json({ submissions: rows.results.map((r) => publicSubmission(r, false)) });
+  return json({ submissions: rows.results.map((r) => publicSubmission(r, false, secret)) });
 }
 
-async function getSubmission(request: Request, env: Env, tid: string | null, id: string): Promise<Response> {
+async function getSubmission(request: Request, env: Env, tenant: Tenant | null, tid: string | null, id: string): Promise<Response> {
   if (!tid) return json({ error: "Not found" }, 404);
+  if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
   const row = await env.DB.prepare(
-    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
+    "SELECT id, project_name, team_name, email, contact, repo_owner, repo_name, repo_url, description, video_url, shot_count, locked_sha, created_at, demo_url, demo_user, demo_pass, readme_md FROM submissions WHERE id = ? AND tenant_id = ? AND status = 'ready'",
   )
     .bind(id, tid)
     .first<Record<string, unknown>>();
   if (!row) return json({ error: "Not found" }, 404);
-  // Contact info (email/wechat) is for judges only — never expose it to anonymous viewers.
+  // Contact + demo credentials are for judges/admin only — never expose to anonymous viewers.
   const auth = await getAuth(request, env, tid);
-  return json({ submission: publicSubmission(row, Boolean(auth)) });
+  return json({ submission: publicSubmission(row, Boolean(auth), tenant?.mode === "secret") });
 }
 
-function publicSubmission(row: Record<string, unknown>, includeContact: boolean) {
+function publicSubmission(row: Record<string, unknown>, includeContact: boolean, secret = false) {
   const id = String(row.id);
   const shotCount = Number(row.shot_count ?? 0);
   return {
@@ -1161,11 +1252,72 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean)
     createdAt: row.created_at,
     shots: Array.from({ length: shotCount }, (_, i) => `/shot/${id}/${i}`),
     viewUrl: `/p/${id}`,
+    // Secret mode: online demo + README are shown to anyone who passed the gate; the demo
+    // credentials are judges/admin only (like contact).
+    secret,
+    demoUrl: secret ? (row.demo_url ?? null) : null,
+    readmeMd: secret ? (row.readme_md ?? null) : null,
+    demoUser: secret && includeContact ? (row.demo_user ?? null) : null,
+    demoPass: secret && includeContact ? (row.demo_pass ?? null) : null,
   };
 }
 
-async function createSubmission(request: Request, env: Env, tid: string | null): Promise<Response> {
+// Secret-mode submission: online demo + credentials + pasted README + private repo. No public-repo
+// validation, no screenshots; gated by the access session; edits require the returned edit token.
+async function createSecretSubmission(request: Request, env: Env, tenant: Tenant, tid: string): Promise<Response> {
+  if (!(await hasSecretAccess(request, env, tenant))) return json({ error: "需要访问码 / Access required" }, 403);
+  const body = await request
+    .json<{ projectName?: string; teamName?: string; email?: string; demoUrl?: string; demoUser?: string; demoPass?: string; readmeMd?: string; repoUrl?: string; videoUrl?: string; editToken?: string }>()
+    .catch(() => null);
+  if (!body) return json({ error: "Invalid JSON" }, 400);
+  const projectName = String(body.projectName ?? "").trim().slice(0, 80);
+  const teamName = String(body.teamName ?? "").trim().slice(0, 80);
+  const email = normalizeEmail(body.email);
+  const demoUrl = String(body.demoUrl ?? "").trim();
+  const demoUser = String(body.demoUser ?? "").trim().slice(0, 120) || null;
+  const demoPass = String(body.demoPass ?? "").trim().slice(0, 200) || null;
+  const readmeMd = String(body.readmeMd ?? "").trim().slice(0, 20000);
+  const videoUrl = String(body.videoUrl ?? "").trim();
+  const repo = parseRepoUrl(body.repoUrl);
+  if (!projectName) return json({ error: "请填写产品名称 / Product name required" }, 400);
+  if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
+  if (!isHttpUrl(demoUrl) || demoUrl.length > 500) return json({ error: "请填写有效的在线 Demo 链接 / Valid demo URL required" }, 400);
+  if (!demoUser || !demoPass) return json({ error: "请填写 Demo 账号和密码 / Demo username & password required" }, 400);
+  if (readmeMd.length < 20) return json({ error: "请粘贴项目 README(至少 20 字)/ Paste a README (20+ chars)" }, 400);
+  if (!repo) return json({ error: "GitHub 私有仓库链接无效 / Invalid repo URL" }, 400);
+  if (videoUrl && (!isHttpUrl(videoUrl) || videoUrl.length > 500)) return json({ error: "视频链接无效 / Invalid video link" }, 400);
+
+  const now = unixNow();
+  const existing = await env.DB.prepare(
+    "SELECT id, edit_token FROM submissions WHERE tenant_id = ? AND repo_owner = ? AND repo_name = ?",
+  )
+    .bind(tid, repo.owner, repo.repo)
+    .first<{ id: string; edit_token: string }>();
+  if (existing) {
+    if (String(body.editToken ?? "") !== existing.edit_token) {
+      return json({ error: "该仓库已提交,请用编辑令牌修改 / Already submitted — use the edit token" }, 409);
+    }
+    await env.DB.prepare(
+      "UPDATE submissions SET project_name = ?, team_name = ?, email = ?, repo_url = ?, demo_url = ?, demo_user = ?, demo_pass = ?, readme_md = ?, video_url = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(projectName, teamName, email, repoUrl(repo), demoUrl, demoUser, demoPass, readmeMd, videoUrl, now, existing.id)
+      .run();
+    return json({ ok: true, id: existing.id, editToken: existing.edit_token, viewUrl: `/p/${existing.id}`, updated: true });
+  }
+  const id = crypto.randomUUID();
+  const shareToken = randomToken(16);
+  const editToken = randomToken(18);
+  await env.DB.prepare(
+    "INSERT INTO submissions (id, tenant_id, project_name, team_name, email, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, demo_url, demo_user, demo_pass, readme_md, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, 0, '[]', ?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
+  )
+    .bind(id, tid, projectName, teamName, email, repo.owner, repo.repo, repoUrl(repo), videoUrl, shareToken, editToken, demoUrl, demoUser, demoPass, readmeMd, now, now)
+    .run();
+  return json({ ok: true, id, editToken, viewUrl: `/p/${id}` });
+}
+
+async function createSubmission(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
   if (!tid) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
+  if (tenant?.mode === "secret") return createSecretSubmission(request, env, tenant, tid);
   const body = await request
     .json<{
       passcode?: string;
@@ -1586,22 +1738,28 @@ async function listInvites(request: Request, env: Env, tid: string | null): Prom
 async function createJudges(request: Request, env: Env, tid: string | null): Promise<Response> {
   const auth = await requireRole(request, env, tid, "admin");
   if (!auth) return json({ error: "Admin only" }, 403);
-  const body = await request.json<{ names?: string[]; prefix?: string }>().catch(() => null);
-  const names = (Array.isArray(body?.names) ? body!.names : [])
-    .map((n) => String(n ?? "").trim().slice(0, 40))
-    .filter(Boolean)
+  const body = await request.json<{ names?: string[]; githubs?: string[]; prefix?: string }>().catch(() => null);
+  const rawNames = Array.isArray(body?.names) ? body!.names : [];
+  const rawGithubs = Array.isArray(body?.githubs) ? body!.githubs : [];
+  const entries = rawNames
+    .map((n, i) => ({
+      name: String(n ?? "").trim().slice(0, 40),
+      // GitHub usernames: alphanumeric + single hyphens, ≤39 chars.
+      github: String(rawGithubs[i] ?? "").trim().replace(/^@/, "").replace(/[^A-Za-z0-9-]/g, "").slice(0, 39) || null,
+    }))
+    .filter((e) => e.name)
     .slice(0, 200);
-  if (!names.length) return json({ error: "请提供至少一个评委姓名 / At least one name required" }, 400);
+  if (!entries.length) return json({ error: "请提供至少一个评委姓名 / At least one name required" }, 400);
   const prefix = (String(body?.prefix ?? "J").trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || "J").slice(0, 8);
 
   const now = unixNow();
-  const created: { name: string; code: string }[] = [];
+  const created: { name: string; code: string; github: string | null }[] = [];
   const stmts: D1PreparedStatement[] = [];
-  const insert = env.DB.prepare("INSERT OR IGNORE INTO judges (code, tenant_id, name, created_at) VALUES (?, ?, ?, ?)");
-  for (const name of names) {
+  const insert = env.DB.prepare("INSERT OR IGNORE INTO judges (code, tenant_id, name, github_user, created_at) VALUES (?, ?, ?, ?, ?)");
+  for (const e of entries) {
     const code = `${prefix}-${randomCodeBody(6)}`;
-    created.push({ name, code });
-    stmts.push(insert.bind(code, tid, name, now));
+    created.push({ name: e.name, code, github: e.github });
+    stmts.push(insert.bind(code, tid, e.name, e.github, now));
   }
   await env.DB.batch(stmts);
   return json({ ok: true, count: created.length, judges: created });
@@ -2210,6 +2368,8 @@ const APP_HTML = String.raw`<!doctype html>
       if(p === '/settings') return ME_USER.email ? renderSettings() : renderPlatformLogin();
       return renderPlatformLanding();
     }
+    // Secret tenant, not yet unlocked: show the access gate for everything except judge login.
+    if(CONFIG.tenant && CONFIG.tenant.gated && p !== '/judge') return renderGate();
     if(p === '/' || p === '') return renderWall();
     if(p === '/submit') return renderSubmit();
     if(p === '/judge') return renderJudge();
@@ -2231,6 +2391,28 @@ const APP_HTML = String.raw`<!doctype html>
   }
 
   // ---------------- work wall ----------------
+  function renderGate(){
+    const tn = CONFIG.tenant || {};
+    app.innerHTML = '<div style="max-width:440px;margin:8vh auto">'
+      + '<div class="panel" style="text-align:center">'
+      + '<div style="font-size:40px;margin-bottom:6px">🔒</div>'
+      + '<h1 style="font-size:24px;margin:0 0 6px">'+esc(tn.name||'')+'</h1>'
+      + '<p class="muted">'+t('这是一场受邀的私密黑客松,请输入主办方发给你的访问码。','A private, invite-only hackathon. Enter the access code from the organizer.')+'</p>'
+      + '<input id="gCode" placeholder="'+t('访问码','Access code')+'" style="text-align:center;margin-top:10px">'
+      + '<div class="row" style="margin-top:12px;justify-content:center"><button id="gBtn">'+t('进入','Enter')+'</button></div>'
+      + '<div id="gMsg" class="muted" style="margin-top:8px"></div>'
+      + '<div class="muted" style="margin-top:12px;font-size:12px"><a href="/judge" onclick="go(\'/judge\');return false">'+t('我是评委,去登录 →','I am a judge →')+'</a></div>'
+      + '</div></div>';
+    $('#gBtn').addEventListener('click', async ()=>{
+      const code = $('#gCode').value.trim();
+      if(!code){ setMsg('gMsg', t('请输入访问码','Enter the code'), true); return; }
+      $('#gBtn').disabled=true; setMsg('gMsg', t('验证中…','Checking…'));
+      try{ await api('/api/tenant/access',{method:'POST',body:{code}});
+        CONFIG = await api('/api/config'); renderNav(); go('/');
+      }catch(e){ setMsg('gMsg', e.message, true); $('#gBtn').disabled=false; }
+    });
+    $('#gCode').addEventListener('keydown', e=>{ if(e.key==='Enter') $('#gBtn').click(); });
+  }
   async function renderWall(){
     app.innerHTML = tenantHero()
       + '<h1>'+esc((CONFIG.tenant&&CONFIG.tenant.name)||CONFIG.eventName)+' · '+t('作品墙','Gallery')+'</h1>'
@@ -2490,10 +2672,13 @@ const APP_HTML = String.raw`<!doctype html>
             + '<label>'+t('子域名','Subdomain')+' <span class="muted">.hack5.net</span></label><input id="hSub" maxlength="30" placeholder="shanghai2026">'
             + '<label>'+t('黑客松简介','Intro')+' * <span class="muted">'+t('(会显示在首页,至少 10 字)','(shown on your homepage, 10+ chars)')+'</span></label><textarea id="hIntro" rows="3" maxlength="2000" placeholder="'+t('这是一场关于…的黑客松,面向…,欢迎…','A hackathon about… for… come build…')+'"></textarea>'
             + '<label>'+t('首页 Banner 图','Homepage banner')+' <span class="muted">'+t('(可选,不传给默认款;宽幅,自动裁并压 ≤120KB)','(optional — a default is generated; wide, ≤120KB)')+'</span></label><input id="hBanner" type="file" accept="image/png,image/jpeg,image/webp"><div id="hBannerPrev"></div>'
+            + '<label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="hSecret" style="width:auto"> '+t('🔒 私密 / 企业模式(需访问码才能进,不暴露源码)','🔒 Private / enterprise (access-gated, no source exposed)')+'</label>'
+            + '<div id="hSecretOpts" style="display:none"><label>'+t('访问有效期(天)','Access validity (days)')+'</label><input id="hDays" type="number" min="1" max="90" value="7" style="max-width:120px"></div>'
             + '<div class="row" style="margin-top:14px"><button id="hCreate">'+t('创建并部署','Create & deploy')+'</button></div><div id="hMsg"></div>'
           : '<div class="notice">'+t('已达免费额度。充值 ¥99 可举办 100 场。','Free quota reached. Upgrade (¥99) for 100 hackathons.')+'</div><div class="row" style="margin-top:12px"><button id="hUpgrade">'+t('充值 ¥99','Upgrade ¥99')+'</button></div>')
       + '</div></div>';
     if(canCreate){
+      const sc=$('#hSecret'); if(sc) sc.addEventListener('change', ()=>{ $('#hSecretOpts').style.display = sc.checked ? 'block' : 'none'; });
       const bf=$('#hBanner'); if(bf) bf.addEventListener('change', async ev=>{
         const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
         try{ window.__hBanner=await compressBanner(f); $('#hBannerPrev').innerHTML='<img src="'+window.__hBanner+'" alt="banner" style="width:100%;max-width:380px;border-radius:10px;margin-top:8px;border:1px solid var(--line)">'; }
@@ -2503,9 +2688,12 @@ const APP_HTML = String.raw`<!doctype html>
         const name=$('#hName').value.trim(), subdomain=$('#hSub').value.trim().toLowerCase(), intro=$('#hIntro').value.trim();
         if(!name || !subdomain){ setMsg('hMsg', t('请填写名称和子域名','Fill in name and subdomain'), true); return; }
         if(intro.length<10){ setMsg('hMsg', t('请写至少 10 字的简介','Add a 10+ character intro'), true); return; }
+        const secret = $('#hSecret') && $('#hSecret').checked;
+        const mode = secret ? 'secret' : 'open';
+        const accessDays = secret ? Number($('#hDays').value)||7 : 7;
         $('#hCreate').disabled=true; setMsg('hMsg', t('创建中…','Creating…'));
         try {
-          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,banner:window.__hBanner}});
+          const r = await api('/api/platform/hackathons',{method:'POST',body:{name,subdomain,intro,banner:window.__hBanner,mode,accessDays}});
           window.__hBanner='';
           const pw = r.adminPassword;
           const masked = pw.length>7 ? (pw.slice(0,-5)+'****'+pw.slice(-2)) : pw;
@@ -2969,7 +3157,11 @@ const APP_HTML = String.raw`<!doctype html>
       + '<h2>'+esc(s.projectName)+'</h2>'
       + (s.teamName?'<div class="muted">👥 '+esc(s.teamName)+'</div>':'')
       + (s.description?'<p style="color:var(--ink2)">'+esc(s.description)+'</p>':'')
-      + '<div class="kv"><span>'+t('仓库','Repo')+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
+      + (s.secret && s.demoUrl?'<div class="kv"><span>'+t('在线 Demo','Live demo')+'</span><b><a href="'+esc(s.demoUrl)+'" target="_blank" rel="noopener">'+t('打开','Open')+' ↗</a ></b></div>':'')
+      + (s.secret && s.demoUser?'<div class="kv"><span>'+t('Demo 账号','Demo user')+'</span><b>'+esc(s.demoUser)+'</b></div>':'')
+      + (s.secret && s.demoPass?'<div class="kv"><span>'+t('Demo 密码','Demo pass')+'</span><b>'+esc(s.demoPass)+'</b></div>':'')
+      + '<div class="kv"><span>'+(s.secret?t('私有仓库','Private repo'):t('仓库','Repo'))+'</span><b><a href="'+esc(s.repoUrl)+'" target="_blank" rel="noopener">'+esc(s.repoOwner)+'/'+esc(s.repoName)+'</a ></b></div>'
+      + (s.secret?'<div class="muted" style="font-size:12px">'+t('作为协作者可 clone 评估','Clone it as a collaborator to review')+'</div>':'')
       + '<div id="ghMeta"></div>'
       + (s.lockedSha?'<div class="kv"><span>'+t('评审版本','Reviewed')+'</span><b title="'+esc(s.lockedSha)+'">'+esc(s.lockedSha.slice(0,10))+'</b></div>':'')
       + (s.email?'<div class="kv"><span>'+t('邮箱','Email')+'</span><b><a href="mailto:'+esc(s.email)+'">'+esc(s.email)+'</a ></b></div>':'')
@@ -2980,8 +3172,8 @@ const APP_HTML = String.raw`<!doctype html>
       + '</div>'
       + '</div>';
 
-    // github meta
-    api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
+    // github meta — skipped for secret (private repo isn't reachable via the public API)
+    if(!s.secret) api('/api/gh/'+s.repoOwner+'/'+s.repoName).then(d=>{
       $('#ghMeta').innerHTML =
         '<div class="kv"><span>Stars</span><b>★ '+(d.stars??0)+'</b></div>'
         + (d.language?'<div class="kv"><span>'+t('语言','Language')+'</span><b>'+esc(d.language)+'</b></div>':'')
@@ -2993,7 +3185,18 @@ const APP_HTML = String.raw`<!doctype html>
     const dcar = app.querySelector('.detail-shots');
     if(dcar) wireCarousel(dcar, ()=>{ const cur = dcar.querySelector('img.on'); if(cur) openLightbox(cur.src); });
 
-    // readme
+    // readme — secret: render the pasted markdown (escaped) directly; open: fetch from GitHub
+    function readmeFrame(inner){
+      const frame = document.createElement('iframe');
+      frame.className = 'readme-frame';
+      frame.setAttribute('sandbox','allow-popups allow-popups-to-escape-sandbox');
+      frame.srcdoc = '<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:ui-monospace,Menlo,monospace;padding:16px 20px;color:#14161c;line-height:1.6;white-space:pre-wrap;word-break:break-word}</style></head><body>'+inner+'</body></html>';
+      $('#readmeWrap').innerHTML=''; $('#readmeWrap').appendChild(frame);
+    }
+    if(s.secret){
+      $('#readmeWrap').innerHTML='';
+      readmeFrame(esc(s.readmeMd||t('(未提供 README)','(no README)')));
+    } else
     $('#loadReadme').addEventListener('click', async ()=>{
       $('#loadReadme').disabled = true; $('#loadReadme').textContent = t('加载中…','Loading…');
       try {
@@ -3057,7 +3260,44 @@ const APP_HTML = String.raw`<!doctype html>
 
   // ---------------- submit ----------------
   let SHOTS = []; // dataURLs
+  async function renderSecretSubmit(){
+    if(!CONFIG.tenant){ go('/'); return; }
+    let roster = [];
+    try{ roster = (await api('/api/tenant/judges/roster')).judges || []; }catch(e){}
+    const rosterHtml = roster.length
+      ? '<div class="panel" style="max-width:720px;margin-bottom:16px"><b>'+t('本场评委 —— 把他们加为你私有仓库的协作者','Judges — add them as collaborators on your private repo')+'</b>'
+        + '<table class="media-table" style="margin-top:10px"><thead><tr><th>'+t('评委','Judge')+'</th><th>GitHub</th></tr></thead><tbody>'
+        + roster.map(j=>'<tr><td>'+esc(j.name)+'</td><td>'+(j.github?'<a href="https://github.com/'+esc(j.github)+'" target="_blank" rel="noopener">@'+esc(j.github)+'</a >':'<span class="muted">—</span>')+'</td></tr>').join('')
+        + '</tbody></table><p class="muted" style="font-size:12px;margin:8px 2px 0">'+t('在你的仓库 Settings → Collaborators 逐个添加上面账号,评审期保持,结束后可移除。','Add each handle in your repo Settings → Collaborators; keep during judging, remove after.')+'</p></div>'
+      : '<div class="panel" style="max-width:720px;margin-bottom:16px"><span class="muted">'+t('评委名单尚未公布,可先提交,稍后回来加协作者。','Judge roster not published yet — you can submit and add collaborators later.')+'</span></div>';
+    app.innerHTML = '<h1>'+t('提交作品(私密赛)','Submit (private track)')+'</h1>'
+      + '<div class="notice">'+t('私密赛不公开源码:提供在线 Demo + 账号密码给评委体验;代码放 GitHub 私有仓库,把评委加为协作者。','Private track — no public source: give judges an online demo + credentials; keep code in a private repo and add the judges as collaborators.')+'</div>'
+      + rosterHtml
+      + '<div class="panel" style="max-width:720px">'
+      + '<label>'+t('产品名称','Product name')+' *</label><input id="sProj" maxlength="80">'
+      + '<label>'+t('在线 Demo 链接','Online demo URL')+' *</label><input id="sDemo" placeholder="https://your-demo.app">'
+      + '<label>'+t('Demo 账号','Demo username')+' * <span class="muted">'+t('(仅评委可见)','(judges only)')+'</span></label><input id="sUser" maxlength="120">'
+      + '<label>'+t('Demo 密码','Demo password')+' * <span class="muted">'+t('(仅评委可见)','(judges only)')+'</span></label><input id="sPass" maxlength="200">'
+      + '<label>'+t('项目 README(粘贴 Markdown)','README (paste Markdown)')+' *</label><textarea id="sReadme" rows="8" maxlength="20000" placeholder="# 项目\n介绍、技术栈、亮点…"></textarea>'
+      + '<label>'+t('GitHub 私有仓库链接','Private repo URL')+' *</label><input id="sRepo" placeholder="https://github.com/owner/repo">'
+      + '<label>'+t('演示视频链接(可选)','Demo video (optional)')+'</label><input id="sVideo" placeholder="https://...">'
+      + '<label>'+t('联系邮箱','Contact email')+' *</label><input id="sEmail" type="email" maxlength="254" placeholder="you@example.com">'
+      + '<label>'+t('队伍名称(可选)','Team (optional)')+'</label><input id="sTeam" maxlength="80">'
+      + '<div class="row" style="margin-top:16px"><button id="sBtn">'+t('提交','Submit')+'</button></div><div id="sMsg"></div>'
+      + '</div>';
+    $('#sBtn').addEventListener('click', doSecretSubmit);
+  }
+  async function doSecretSubmit(){
+    const body = { projectName:$('#sProj').value.trim(), demoUrl:$('#sDemo').value.trim(), demoUser:$('#sUser').value.trim(), demoPass:$('#sPass').value.trim(), readmeMd:$('#sReadme').value.trim(), repoUrl:$('#sRepo').value.trim(), videoUrl:$('#sVideo').value.trim(), email:$('#sEmail').value.trim(), teamName:$('#sTeam').value.trim() };
+    if(!body.projectName||!body.demoUrl||!body.demoUser||!body.demoPass||!body.readmeMd||!body.repoUrl||!body.email){ setMsg('sMsg', t('请填齐带 * 的必填项','Fill in all required (*) fields'), true); return; }
+    $('#sBtn').disabled=true; setMsg('sMsg', t('提交中…','Submitting…'));
+    try{ const r=await api('/api/submissions',{method:'POST',body});
+      setMsg('sMsg', t('提交成功!','Submitted! ')+'<a href="'+r.viewUrl+'" onclick="go(\''+r.viewUrl+'\');return false">'+t('查看','View')+'</a ><br>'+t('编辑令牌(改稿用,请保存):','Edit token (save it to edit later): ')+'<code>'+esc(r.editToken)+'</code>', false, true);
+    }catch(e){ setMsg('sMsg', e.message, true); }
+    finally{ $('#sBtn').disabled=false; }
+  }
   async function renderSubmit(){
+    if(CONFIG.tenant && CONFIG.tenant.mode==='secret') return renderSecretSubmit();
     // NB: SHOTS is intentionally NOT reset here, so a language toggle / re-render keeps
     // already-selected screenshots. It's cleared after a successful submit instead.
     const mb = Math.round(CONFIG.maxShotBytes/1048576*10)/10;
@@ -3258,7 +3498,7 @@ const APP_HTML = String.raw`<!doctype html>
     if(ME.role !== 'admin'){ go('/judge'); return; }
     app.innerHTML = '<h1>'+t('评委登录码','Judge login codes')+'</h1><p>'+t('每个评委一个专属登录码,码绑定姓名,打分身份用码区分(不会同名互相覆盖)。','One code per judge, bound to a name; scores are keyed by code so same names never overwrite.')+'</p>'
       + '<div class="panel" style="max-width:640px">'
-      + '<label>'+t('评委姓名(每行一个)','Judge names (one per line)')+'</label><textarea id="jNames" rows="5" placeholder="'+t('张三&#10;李四&#10;王五','Alice&#10;Bob&#10;Carol')+'"></textarea>'
+      + '<label>'+t('评委(每行一个:姓名 或 姓名, GitHub)','Judges (one per line: name, or name, github)')+' <span class="muted">'+t('GitHub 用于私密赛加协作者','GitHub is for private-track collaborators')+'</span></label><textarea id="jNames" rows="5" placeholder="'+t('张三, alice-gh&#10;李四, bob-gh','Alice, alice-gh&#10;Bob, bob-gh')+'"></textarea>'
       + '<div class="row" style="margin-top:6px"><div style="flex:1"><label>'+t('前缀','Prefix')+'</label><input id="jPrefix" maxlength="8" value="J"></div>'
       + '<div style="align-self:flex-end"><button id="jGen">'+t('生成登录码','Generate codes')+'</button></div></div>'
       + '<div id="jGenOut"></div></div>'
@@ -3267,14 +3507,16 @@ const APP_HTML = String.raw`<!doctype html>
       + '<div id="jList" style="margin-top:12px"><p class="muted">'+t('加载中…','Loading…')+'</p></div></div>';
 
     $('#jGen').addEventListener('click', async ()=>{
-      const names = $('#jNames').value.split('\n').map(s=>s.trim()).filter(Boolean);
+      const lines = $('#jNames').value.split('\n').map(s=>s.trim()).filter(Boolean);
+      const names = lines.map(l=>l.split(',')[0].trim());
+      const githubs = lines.map(l=>{ const p=l.split(','); return p.length>1?p.slice(1).join(',').trim():''; });
       const prefix = $('#jPrefix').value.trim();
-      if(!names.length){ alert(t('请至少输入一个姓名','Enter at least one name')); return; }
+      if(!names.filter(Boolean).length){ alert(t('请至少输入一个姓名','Enter at least one name')); return; }
       $('#jGen').disabled = true;
       try {
-        const r = await api('/api/judges',{method:'POST',body:{names,prefix}});
+        const r = await api('/api/judges',{method:'POST',body:{names,githubs,prefix}});
         $('#jGenOut').innerHTML = '<div class="notice ok">'+t('已生成 ','Generated ')+r.count+t(' 个,发给各评委:',' — hand out to judges:')+'</div>'
-          + '<textarea readonly rows="6" style="font-family:ui-monospace,monospace">'+r.judges.map(j=>j.name+'  '+j.code).join('\n')+'</textarea>';
+          + '<textarea readonly rows="6" style="font-family:ui-monospace,monospace">'+r.judges.map(j=>j.name+(j.github?' (@'+j.github+')':'')+'  '+j.code).join('\n')+'</textarea>';
         $('#jNames').value = '';
         loadJudgeList();
       } catch(e){ $('#jGenOut').innerHTML = '<div class="notice err">'+esc(e.message)+'</div>'; }
