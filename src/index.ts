@@ -73,6 +73,18 @@ export default {
       const tenant = tctx.tenant;
       const tid = tenant ? tenant.id : null;
 
+      // Secret-mode gate (server-side, not just the SPA): for a secret tenant with no access session,
+      // block every data API and content-asset route. Allow only config, auth (judge/admin login),
+      // the access-code redemption, and the SPA shell so the gate page can render.
+      if (tenant && tenant.mode === "secret" && !(await hasSecretAccess(request, env, tenant))) {
+        const allowedApi = path === "/api/config" || path === "/api/tenant/access" || path.startsWith("/api/auth/");
+        const blockedAsset =
+          path.startsWith("/photo/") || path.startsWith("/banner/") || path.startsWith("/qr/") || path.startsWith("/shot/") || path.startsWith("/media/");
+        if ((path.startsWith("/api/") && !allowedApi) || blockedAsset) {
+          return json({ error: "需要访问码 / Access required" }, 403);
+        }
+      }
+
       // ---- config & auth ----
       if (path === "/api/config" && method === "GET") return getConfig(request, env);
       if (path === "/api/auth/login" && method === "POST") return login(request, env, tenant);
@@ -109,7 +121,7 @@ export default {
       // ---- homepage banner ----
       if (path === "/api/tenant/banner" && method === "POST") return updateBanner(request, env, tenant);
       const bannerServe = path.match(/^\/banner\/([a-z0-9-]+)$/);
-      if (bannerServe && method === "GET") return serveBanner(env, bannerServe[1]);
+      if (bannerServe && method === "GET") return serveBanner(request, env, bannerServe[1]);
       const qrServe = path.match(/^\/qr\/([a-z0-9-]+)$/);
       if (qrServe && method === "GET") return serveQr(env, qrServe[1]);
 
@@ -125,7 +137,7 @@ export default {
       const photoDel = path.match(/^\/api\/tenant\/photos\/([^/]+)$/);
       if (photoDel && method === "DELETE") return deletePhoto(request, env, tenant, photoDel[1]);
       const photoServe = path.match(/^\/photo\/([^/]+)\/([^/]+)$/);
-      if (photoServe && method === "GET") return servePhoto(env, photoServe[1], photoServe[2]);
+      if (photoServe && method === "GET") return servePhoto(request, env, photoServe[1], photoServe[2]);
 
       // ---- submissions (tenant-scoped) ----
       if (path === "/api/submissions" && method === "GET") return listSubmissions(request, env, tenant, tid);
@@ -351,6 +363,9 @@ async function getAuth(request: Request, env: Env, tid: string | null): Promise<
   try {
     const payload = JSON.parse(b64urlDecode(body)) as Auth;
     if (!payload || typeof payload.exp !== "number" || payload.exp < unixNow()) return null;
+    // Token-type separation: an hv_access session token ({tenant, exp}, no role) must NOT be
+    // accepted as an hv_auth judge/admin session — reject anything without a real role.
+    if (payload.role !== "judge" && payload.role !== "admin") return null;
     // A cookie is only valid on the tenant it was issued for.
     if (!tid || payload.tenant !== tid) return null;
     return payload;
@@ -1095,7 +1110,13 @@ async function listPhotos(env: Env, tid: string | null): Promise<Response> {
   });
 }
 
-async function servePhoto(env: Env, tid: string, id: string): Promise<Response> {
+async function servePhoto(request: Request, env: Env, tid: string, id: string): Promise<Response> {
+  // Cross-host path-param route: gate secret tenants' photos here (ids are unguessable + the list
+  // is gated, but defend in depth anyway).
+  const trow = await env.DB.prepare("SELECT mode FROM tenants WHERE id = ?").bind(tid).first<{ mode: string }>();
+  if (trow?.mode === "secret" && !(await getAccessSession(request, env, tid)) && !(await getAuth(request, env, tid))) {
+    return json({ error: "Not found" }, 404);
+  }
   const { value, metadata } = await env.SHOTS.getWithMetadata<{ contentType?: string }>(`photo:${tid}:${id}`, {
     type: "arrayBuffer",
   });
@@ -1140,11 +1161,15 @@ async function serveQr(env: Env, sub: string): Promise<Response> {
 }
 
 // Homepage banner: served by subdomain (public, cached), stored in KV as banner:<tid>.
-async function serveBanner(env: Env, sub: string): Promise<Response> {
-  const row = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ? AND status = 'active'")
+async function serveBanner(request: Request, env: Env, sub: string): Promise<Response> {
+  const row = await env.DB.prepare("SELECT id, mode FROM tenants WHERE subdomain = ? AND status = 'active'")
     .bind(sub)
-    .first<{ id: string }>();
+    .first<{ id: string; mode: string }>();
   if (!row) return json({ error: "Not found" }, 404);
+  // Path-param route works cross-host, so the central gate can't cover it — gate secret banners here.
+  if (row.mode === "secret" && !(await getAccessSession(request, env, row.id)) && !(await getAuth(request, env, row.id))) {
+    return json({ error: "Not found" }, 404);
+  }
   const { value, metadata } = await env.SHOTS.getWithMetadata<{ contentType?: string }>(`banner:${row.id}`, {
     type: "arrayBuffer",
   });
@@ -1252,13 +1277,17 @@ function publicSubmission(row: Record<string, unknown>, includeContact: boolean,
     createdAt: row.created_at,
     shots: Array.from({ length: shotCount }, (_, i) => `/shot/${id}/${i}`),
     viewUrl: `/p/${id}`,
-    // Secret mode: online demo + README are shown to anyone who passed the gate; the demo
-    // credentials are judges/admin only (like contact).
-    secret,
-    demoUrl: secret ? (row.demo_url ?? null) : null,
-    readmeMd: secret ? (row.readme_md ?? null) : null,
-    demoUser: secret && includeContact ? (row.demo_user ?? null) : null,
-    demoPass: secret && includeContact ? (row.demo_pass ?? null) : null,
+    // Secret fields only appear for secret tenants (open-mode responses stay unchanged). Online
+    // demo + README show to anyone past the gate; credentials are judges/admin only (like contact).
+    ...(secret
+      ? {
+          secret: true,
+          demoUrl: row.demo_url ?? null,
+          readmeMd: row.readme_md ?? null,
+          demoUser: includeContact ? (row.demo_user ?? null) : null,
+          demoPass: includeContact ? (row.demo_pass ?? null) : null,
+        }
+      : {}),
   };
 }
 
