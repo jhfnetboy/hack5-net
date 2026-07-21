@@ -3559,6 +3559,10 @@ const APP_HTML = String.raw`<!doctype html>
     '对话已存本机浏览器,重进本页可继续;清空会丢失,建议先下载。':'บทสนทนาถูกเก็บในเบราว์เซอร์นี้ กลับมาหน้านี้เพื่อทำต่อได้ การล้างจะทำให้หาย ควรดาวน์โหลดไว้ก่อน',
     '清空后当前对话会丢失,建议先「下载对话」保存。确定清空?':'การล้างจะทำให้บทสนทนานี้หาย ควรกด「ดาวน์โหลดบทสนทนา」เก็บไว้ก่อน ยืนยันล้าง?',
     '报名确认邮件已发到你的邮箱 📩(没收到看下垃圾箱)。主办方会把你的参赛邀请码发给你(微信 / 邮件 / 群),拿到后到「提交作品」填邀请码提交。建议收藏本页。':'ส่งอีเมลยืนยันการลงทะเบียนไปแล้ว 📩 (ถ้าไม่พบ ลองดูในโฟลเดอร์สแปม) ผู้จัดจะส่งรหัสเชิญให้คุณ (WeChat / อีเมล / กลุ่ม) เมื่อได้แล้วไปที่「ส่งผลงาน」แล้วกรอกรหัสเชิญเพื่อส่ง แนะนำให้บุ๊กมาร์กหน้านี้',
+    // participant email verification (mine hub)
+    '已验证邮箱':'ยืนยันอีเมลแล้ว', '退出登录':'ออกจากระบบ', '加载积分…':'กำลังโหลดเครดิต…',
+    '积分余额':'ยอดเครดิต', '积分账户未开通':'ยังไม่เปิดบัญชีเครดิต', '验证登录':'ยืนยันเข้าสู่ระบบ', '发送中…':'กำลังส่ง…',
+    '验证邮箱可查看你的作品详情与积分余额':'ยืนยันอีเมลเพื่อดูรายละเอียดผลงานและยอดเครดิตของคุณ',
   };
 
   function initTheme(){
@@ -3722,6 +3726,7 @@ const APP_HTML = String.raw`<!doctype html>
     app.innerHTML = '<h1>'+t('我的黑客松','My hackathon')+'</h1>'
       + (name ? '<p class="muted">'+name+'</p>' : '')
       + '<div id="mineStatus" class="panel" style="max-width:560px">'+t('加载中…','Loading…')+'</div>'
+      + '<div id="mineAuth" style="max-width:560px;margin-top:12px"></div>'
       + '<h3 style="margin:18px 0 8px">'+t('参与','Take part')+'</h3>'
       + '<div class="row" id="mineActions" style="gap:10px;flex-wrap:wrap">'
       +   '<button onclick="go(\'/register\')">'+t('报名','Register')+'</button>'
@@ -3760,7 +3765,53 @@ const APP_HTML = String.raw`<!doctype html>
         html += '<br>⚪ '+t('还没有提交作品','No project submitted yet');
       }
       s.innerHTML = html + '</div>';
+      renderMineAuth(me);
     }catch(e){}
+  }
+  // Participant email verification (#47): unverified sessions can register/build but can't see admin-only
+  // details or their credits. This inline flow (email → code → verify) upgrades the session to verified,
+  // reusing the same email-code backend the platform login uses. On success it re-renders /mine.
+  async function renderMineAuth(me){
+    const el = $('#mineAuth'); if(!el) return;
+    if(me && me.verified){
+      el.innerHTML = '<div class="panel"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
+        + '<span>✅ '+t('已验证邮箱','Email verified')+' · <b>'+esc(me.email||'')+'</b></span>'
+        + '<button class="ghost" id="mineLogout">'+t('退出登录','Log out')+'</button></div>'
+        + '<div id="mineCredits" class="muted" style="margin-top:8px;font-size:13px">'+t('加载积分…','Loading credits…')+'</div></div>';
+      $('#mineLogout').onclick = async ()=>{ await api('/api/tenant/participant/logout',{method:'POST',body:{}}).catch(()=>{}); renderMine(); };
+      try{ const c = await api('/api/tenant/mini/credits'); const cel=$('#mineCredits');
+        if(cel){ cel.innerHTML = (c && c.credits!=null) ? ('💳 '+t('积分余额','Credits')+': <b>'+c.credits+'</b>') : t('积分账户未开通','Credits not enabled'); }
+      }catch(e){}
+      return;
+    }
+    // not verified — offer email verification
+    el.innerHTML = '<div class="panel"><p style="margin:0 0 8px">🔐 '+t('验证邮箱可查看你的作品详情与积分余额','Verify your email to see your project details and credit balance')+'</p>'
+      + '<label>'+t('邮箱','Email')+'</label><input id="miEmail" type="email" autocomplete="email" maxlength="254" placeholder="you@example.com"'+(me&&me.email?' value="'+esc(me.email)+'"':'')+'>'
+      + '<div id="miCodeArea" class="hidden"><label>'+t('验证码','Code')+'</label><input id="miCode" inputmode="numeric" maxlength="6" placeholder="'+t('6 位验证码','6-digit code')+'"></div>'
+      + (CONFIG.turnstileSiteKey ? '<div id="mits" style="margin-top:12px"></div>' : '')
+      + '<div class="row" style="margin-top:12px"><button id="miSend">'+t('发送验证码','Send code')+'</button><button id="miVerify" class="hidden">'+t('验证登录','Verify')+'</button></div>'
+      + '<div id="miMsg" class="muted" style="margin-top:6px;font-size:13px"></div></div>';
+    let miTs = null;
+    if(CONFIG.turnstileSiteKey) ensureTurnstile().then(()=>{ try{ miTs = window.turnstile.render('#mits', {sitekey: CONFIG.turnstileSiteKey}); }catch(e){} });
+    $('#miSend').addEventListener('click', async ()=>{
+      const email = $('#miEmail').value.trim();
+      if(!email){ setMsg('miMsg', t('请填写邮箱','Email required'), true); return; }
+      let turnstileToken;
+      if(CONFIG.turnstileSiteKey){
+        turnstileToken = (window.turnstile && miTs!=null) ? window.turnstile.getResponse(miTs) : '';
+        if(!turnstileToken){ setMsg('miMsg', t('请先完成人机验证','Please complete the check'), true); return; }
+      }
+      setMsg('miMsg', t('发送中…','Sending…'));
+      try{ const r=await api('/api/tenant/participant/login/request',{method:'POST',body:{email, turnstileToken}});
+        $('#miCodeArea').classList.remove('hidden'); $('#miVerify').classList.remove('hidden');
+        setMsg('miMsg', t('验证码已发送,请查收邮箱。','Code sent — check your email.')+(r.debugCode?(' [dev: '+r.debugCode+']'):''));
+      }catch(e){ setMsg('miMsg', e.message, true); if(window.turnstile && miTs!=null) try{ window.turnstile.reset(miTs); }catch(_){} }
+    });
+    $('#miVerify').addEventListener('click', async ()=>{
+      try{ await api('/api/tenant/participant/login/verify',{method:'POST',body:{email:$('#miEmail').value.trim(), code:$('#miCode').value.trim()}});
+        renderMine();
+      }catch(e){ setMsg('miMsg', e.message, true); }
+    });
   }
 
   async function renderWall(){
