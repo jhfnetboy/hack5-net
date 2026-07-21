@@ -37,13 +37,15 @@ interface Env {
   OPENAI_API_KEY?: string; // premium: AI text-to-image poster (gpt-image-1)
   SIGNED_UPLOAD_EXPIRES_SECONDS?: string;
   // ---- WorkBench (Mini × fde-copilot/loop-engineer) — contract §5 v2, CC-51 ----
-  WORKBENCH_BASE_URL?: string; // fde-copilot/loop-engineer base URL (unset → mock)
+  WORKBENCH_BASE_URL?: string; // fde-copilot base URL (clients/projects/chat/commit/usage); unset → mock
+  WORKBENCH_LOOP_URL?: string; // loop-engineer base URL (plan/run/status), e.g. https://loop.aastar.io
   WORKBENCH_TOKEN?: string; // admin orchestration token (B3)
   WORKBENCH_CALLBACK_SECRET?: string; // HMAC key to verify inbound W5 callbacks (C2)
   WORKBENCH_MOCK?: string; // "1" forces offline mock data (WorkBench client, AI naming self-test, ...)
   // ---- Mini participant public-repo provisioning (B2, CC-51) ----
   GITHUB_BOT_TOKEN?: string; // isolated bot account/org credential (CF secret) — create/delete repos
-  GITHUB_BOT_OWNER?: string; // bot login owning the repos (default hack5-mini-bot)
+  HACK5_GITHUB_PAT?: string; // existing hack5 bot PAT (clestons account); alias of GITHUB_BOT_TOKEN
+  GITHUB_BOT_OWNER?: string; // bot login owning the repos (default clestons)
   GITHUB_BOT_IS_ORG?: string; // "1" if the bot owner is an org
   GITHUB_APP_ID?: string; // GitHub App for repo-scoped short-lived push tokens
   GITHUB_APP_PRIVATE_KEY?: string; // PKCS#8 PEM

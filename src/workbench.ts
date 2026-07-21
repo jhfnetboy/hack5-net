@@ -15,7 +15,8 @@
 // tested before the real WorkBench / Mac Mini is online (A8 real integration is blocked on W1/W2).
 
 export interface WorkbenchEnv {
-  WORKBENCH_BASE_URL?: string; // e.g. https://self-fde-workbench.example
+  WORKBENCH_BASE_URL?: string; // fde-copilot (clients/projects/chat/commit/usage), e.g. https://workbench.aastar.io
+  WORKBENCH_LOOP_URL?: string; // loop-engineer (plan/run/status), e.g. https://loop.aastar.io
   WORKBENCH_TOKEN?: string; // admin orchestration token (B3)
   WORKBENCH_CALLBACK_SECRET?: string; // HMAC key to verify inbound W5 callbacks (used elsewhere)
   WORKBENCH_SCOPED_SECRET?: string; // shared HMAC key for scoped chat tokens (B3); must equal WorkBench's
@@ -208,13 +209,16 @@ class HttpError extends Error {
 }
 
 function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
+  // Two hosts (CC-52): fde-copilot on WORKBENCH_BASE_URL; loop-engineer (plan/run/status) on
+  // WORKBENCH_LOOP_URL. loopBase falls back to base if the loop URL is not set separately.
   const base = String(env.WORKBENCH_BASE_URL ?? "").replace(/\/+$/, "");
+  const loopBase = String(env.WORKBENCH_LOOP_URL ?? env.WORKBENCH_BASE_URL ?? "").replace(/\/+$/, "");
   const adminToken = env.WORKBENCH_TOKEN ?? "";
 
-  async function call<T>(method: string, path: string, body?: unknown, token?: string): Promise<T> {
+  async function call<T>(host: string, method: string, path: string, body?: unknown, token?: string): Promise<T> {
     const headers: Record<string, string> = { "x-workbench-token": token ?? adminToken };
     if (body !== undefined) headers["content-type"] = "application/json";
-    const res = await fetch(`${base}${path}`, {
+    const res = await fetch(`${host}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -226,14 +230,16 @@ function createHttpClient(env: WorkbenchEnv): WorkbenchClient {
 
   return {
     mock: false,
-    createClient: (input) => call("POST", "/api/clients", input),
-    createProject: (clientSlug, input) => call("POST", `/api/clients/${encodeURIComponent(clientSlug)}/projects`, input),
-    chat: (input, opts) => call("POST", "/api/chat", input, opts?.scopedToken),
-    commit: (input) => call("POST", "/api/commit", input),
-    plan: (input) => call("POST", "/plan", input),
-    run: (jobId) => call("POST", "/run", { jobId }),
-    status: (jobId) => call("GET", `/status/${encodeURIComponent(jobId)}`),
-    usage: (clientSlug) => call("GET", clientSlug ? `/api/usage?client=${encodeURIComponent(clientSlug)}` : "/api/usage"),
+    // fde-copilot (WORKBENCH_BASE_URL)
+    createClient: (input) => call(base, "POST", "/api/clients", input),
+    createProject: (clientSlug, input) => call(base, "POST", `/api/clients/${encodeURIComponent(clientSlug)}/projects`, input),
+    chat: (input, opts) => call(base, "POST", "/api/chat", input, opts?.scopedToken),
+    commit: (input) => call(base, "POST", "/api/commit", input),
+    usage: (clientSlug) => call(base, "GET", clientSlug ? `/api/usage?client=${encodeURIComponent(clientSlug)}` : "/api/usage"),
+    // loop-engineer (WORKBENCH_LOOP_URL)
+    plan: (input) => call(loopBase, "POST", "/plan", input),
+    run: (jobId) => call(loopBase, "POST", "/run", { jobId }),
+    status: (jobId) => call(loopBase, "GET", `/status/${encodeURIComponent(jobId)}`),
   };
 }
 

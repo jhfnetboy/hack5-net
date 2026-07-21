@@ -20,9 +20,10 @@
 // on that provisioning, same class as A8).
 
 export interface RepoBotEnv {
-  // Repo creation credential (one of):
-  GITHUB_BOT_TOKEN?: string; // bot account/org fine-grained token (CF secret) — create + delete repos
-  GITHUB_BOT_OWNER?: string; // bot login that owns the repos (default: hack5-mini-bot)
+  // Repo creation credential (any of — HACK5_GITHUB_PAT is the existing CF secret / ~/Dev/.env one):
+  GITHUB_BOT_TOKEN?: string; // bot account/org fine-grained token — create + delete + push
+  HACK5_GITHUB_PAT?: string; // existing hack5 bot PAT (clestons account); alias of GITHUB_BOT_TOKEN
+  GITHUB_BOT_OWNER?: string; // bot login that owns the repos (default: clestons)
   GITHUB_BOT_IS_ORG?: string; // "1" if the bot owner is an org (uses /orgs/:org/repos)
   // Repo-scoped short-lived push token via GitHub App (preferred for B2):
   GITHUB_APP_ID?: string;
@@ -31,8 +32,13 @@ export interface RepoBotEnv {
   WORKBENCH_MOCK?: string; // "1" forces offline mock
 }
 
-const DEFAULT_BOT_OWNER = "hack5-mini-bot";
+const DEFAULT_BOT_OWNER = "clestons";
 const GITHUB_API = "https://api.github.com";
+
+// The bot credential: prefer GITHUB_BOT_TOKEN, fall back to the existing HACK5_GITHUB_PAT (clestons).
+function botToken(env: RepoBotEnv): string | undefined {
+  return env.GITHUB_BOT_TOKEN || env.HACK5_GITHUB_PAT;
+}
 
 // Repo-name whitelist (defends against path injection / weird GitHub names). Lower-case,
 // digit/hyphen, must start alphanumeric, 1..39 chars — mirrors the plan's B2 whitelist.
@@ -75,7 +81,7 @@ export interface RepoPushToken {
 }
 
 export function repoBotMockEnabled(env: RepoBotEnv): boolean {
-  return env.WORKBENCH_MOCK === "1" || !env.GITHUB_BOT_TOKEN;
+  return env.WORKBENCH_MOCK === "1" || !botToken(env);
 }
 
 function botOwner(env: RepoBotEnv): string {
@@ -199,7 +205,7 @@ export async function createParticipantRepo(env: RepoBotEnv, rawName: string, op
 
   if (repoBotMockEnabled(env)) return mockRepo(owner, name);
 
-  const token = env.GITHUB_BOT_TOKEN as string;
+  const token = botToken(env) as string;
   const isOrg = env.GITHUB_BOT_IS_ORG === "1";
   const body = {
     name,
@@ -240,10 +246,11 @@ export async function mintRepoScopedPushToken(env: RepoBotEnv, repoName: string)
   }
   // Fallback: a repo-scoped fine-grained bot PAT supplied via GITHUB_BOT_TOKEN. MUST be repo-scoped
   // (never account-level, per B2). Reaching here means WORKBENCH_MOCK is off and GITHUB_BOT_TOKEN is set.
-  if (env.GITHUB_BOT_TOKEN) {
-    return { token: env.GITHUB_BOT_TOKEN, expiresAt: "", repository: name };
+  const pat = botToken(env);
+  if (pat) {
+    return { token: pat, expiresAt: "", repository: name };
   }
-  throw new Error("no push credential: configure a GitHub App or a repo-scoped GITHUB_BOT_TOKEN");
+  throw new Error("no push credential: configure a GitHub App or a repo-scoped GITHUB_BOT_TOKEN / HACK5_GITHUB_PAT");
 }
 
 // Delete a repo (used for one-off provisioning self-tests). Needs delete permission on the bot token.
@@ -252,6 +259,6 @@ export async function deleteParticipantRepo(env: RepoBotEnv, repoName: string): 
   if (!check.ok || !check.name) throw new Error(check.error || "invalid repo name");
   const owner = botOwner(env);
   if (repoBotMockEnabled(env)) return { deleted: true, status: 204, mock: true };
-  const res = await githubApi("DELETE", `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(check.name)}`, env.GITHUB_BOT_TOKEN as string);
+  const res = await githubApi("DELETE", `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(check.name)}`, botToken(env) as string);
   return { deleted: res.status === 204, status: res.status };
 }
