@@ -53,11 +53,13 @@ token 实际用量**跑完才知道**,所以要么预授权占用、要么每步
 - **`src/credits.ts`**:balance / reserve / settle / release 客户端(HMAC)+ 成本换算。
 - **查询端点** `GET /api/tenant/mini/credits`:登录参赛者按自己 email 查余额(你要的「email 可查积分」)。未配置 → `{enabled:false}`。
 
-## 5. token 来源(跨 WorkBench)
+## 5. token 成本来源(跨 WorkBench)—— ✅ 已就绪
 
-hack5 需要**每 job / 每轮的实际 token 数**才能精确 settle。来源:
-- chat:fde-copilot 的 usage;loop:loop-engineer 的 coding_done/deployed 回调里带 token 统计。
-- **需要一个跨仓协同项**:WorkBench 在回调 / usage 里上报**每 job 的 token 用量**。此项另发协同任务。
+WorkBench 侧已实现:`GET /api/usage`(可带 `?client=`)返回 **per-project + global 的真实 `costUsd`**(他们的 `estimateCost` + 价表,PR #50 补齐 glm-5.2/MiniMax 缺失价)。例:`{perProject:[{client,project,usage:{inputTokens,outputTokens,costUsd}}], global:{...}}`。
+
+hack5 接入(本仓已实现):**build `deployed` 回调时,按 (client, project) 从 `/api/usage` 拉该 job 的实际 `costUsd`,`credits = ceil(costUsd × 2 / 0.02) = ceil(costUsd × 100)`,写进 `credit_ledger`(记账,一 submission 一行,幂等)。**
+
+> 现阶段**只记账不扣余额**:扣余额必须绑定**已验证账户**(#47 验证会话),否则攻击者用 `email=victim` 建应用即可扣 victim 积分(court 明确的安全红线)。live 扣费 = 下一步,依赖参赛者**验证登录 UI**(#47 后端在、前端未接)+ launch 的 reserve/settle。
 
 ## 6. 分期
 

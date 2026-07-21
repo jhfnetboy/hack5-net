@@ -2,6 +2,7 @@ import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
 import { createWorkbench, workbenchMockEnabled, mintScopedChatToken } from "./workbench";
 import { createParticipantRepo, mintRepoScopedPushToken, deleteParticipantRepo, validateRepoName, repoBotMockEnabled } from "./participant-repo";
+import { costUsdToCredits } from "./credits";
 
 interface Env {
   DB: D1Database;
@@ -1880,9 +1881,9 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
   const clientSlug = String(body.clientSlug ?? "").trim();
   const projectSlug = String(body.projectSlug ?? "").trim();
   if (!clientSlug || !projectSlug) return json({ error: "clientSlug and projectSlug required" }, 400);
-  const row = await env.DB.prepare("SELECT id, build_state FROM submissions WHERE wb_client = ? AND wb_project = ? LIMIT 1")
+  const row = await env.DB.prepare("SELECT id, build_state, email, tenant_id FROM submissions WHERE wb_client = ? AND wb_project = ? LIMIT 1")
     .bind(clientSlug, projectSlug)
-    .first<{ id: string; build_state: string | null }>();
+    .first<{ id: string; build_state: string | null; email: string | null; tenant_id: string | null }>();
   if (!row) return json({ error: "submission not found for client/project" }, 404);
   // Monotonic: state only advances. `failed` applies unless the build already reached the terminal
   // `deployed` — a stale/out-of-order `failed` must not un-deploy a live app. Makes retries idempotent.
@@ -1896,7 +1897,38 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
       .bind(state, appUrl, repo, repo, unixNow(), row.id)
       .run();
   }
+  // The coding loop is done — record this build's actual cost (from WorkBench usage) into the credit
+  // ledger, per participant. Accounting only for now: charging a balance requires a verified account
+  // (a #47-verified session), else an attacker could launch under email=victim and drain their
+  // credits — so live deduction is a follow-up gated on the verified-login flow. Best-effort.
+  if (state === "deployed" && row.email) {
+    await recordBuildCost(env, row.id, row.email, row.tenant_id ?? "", clientSlug, projectSlug);
+  }
   return json({ ok: true, id: row.id, state: advance ? state : current, applied: advance });
+}
+
+// Pull a finished build's real USD cost from WorkBench /api/usage and record it (credits = actual
+// cost × 2 ÷ $0.02) in credit_ledger, one row per submission (idempotent). Never throws — a metering
+// hiccup must not fail the callback. Does NOT deduct a balance (see wbCallback note).
+async function recordBuildCost(env: Env, submissionId: string, email: string, tenantId: string, clientSlug: string, projectSlug: string): Promise<void> {
+  try {
+    const wb = createWorkbench(env);
+    const u = (await wb.usage(clientSlug)) as unknown as {
+      perProject?: Array<{ client?: string; project?: string; usage?: { costUsd?: number; inputTokens?: number; outputTokens?: number } }>;
+    };
+    const entry = Array.isArray(u?.perProject) ? u.perProject.find((p) => p.project === projectSlug) : undefined;
+    const costUsd = Number(entry?.usage?.costUsd ?? 0);
+    const tokens = Number(entry?.usage?.inputTokens ?? 0) + Number(entry?.usage?.outputTokens ?? 0);
+    const credits = costUsdToCredits(env, costUsd);
+    const now = unixNow();
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO credit_ledger (id, tenant_id, email, kind, status, tokens, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'build', 'recorded', ?, ?, ?, ?, ?)",
+    )
+      .bind(`build:${submissionId}`, tenantId, email, tokens, credits, `${clientSlug}/${projectSlug}`, now, now)
+      .run();
+  } catch (err) {
+    console.log("recordBuildCost error", String(err));
+  }
 }
 
 // Callback smoke test — mock-gated (404 in production); verifies the event→state mapping + badge
