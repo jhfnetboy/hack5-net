@@ -998,11 +998,14 @@ function parseAgenda(raw: string | null | undefined): { time: string; title: str
 async function registerParticipant(request: Request, env: Env, tenant: Tenant | null): Promise<Response> {
   if (!tenant) return json({ error: "无效的黑客松 / No hackathon here" }, 404);
   const body = await request.json<{ name?: string; email?: string; note?: string }>().catch(() => null);
-  const name = String(body?.name ?? "").trim().slice(0, 60);
   const email = normalizeEmail(body?.email);
-  const note = String(body?.note ?? "").trim().slice(0, 300) || null;
-  if (!name) return json({ error: "请填写姓名 / Name required" }, 400);
   if (!email) return json({ error: "邮箱无效 / Invalid email" }, 400);
+  const note = String(body?.note ?? "").trim().slice(0, 300) || null;
+  // Mini keeps registration frictionless (it targets non-developers): email only, with the display
+  // name derived from the email local part. Other modes still require an explicit name.
+  let name = String(body?.name ?? "").trim().slice(0, 60);
+  if (!name && tenant.mode === "mini") name = (email.split("@")[0] || "").slice(0, 60);
+  if (!name) return json({ error: "请填写姓名 / Name required" }, 400);
 
   const now = unixNow();
   const ip = request.headers.get("cf-connecting-ip") ?? "local";
@@ -3837,18 +3840,20 @@ const APP_HTML = String.raw`<!doctype html>
     if(ME.role==='admin'){
       try{ const d=await api('/api/tenant/registrations'); adminBlock='<div class="panel" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;align-items:center"><b>'+t('已报名','Registered')+': '+d.count+'</b><a href="/api/tenant/registrations/export"><button class="ghost">'+t('导出 CSV','Export CSV')+'</button></a ></div></div>'; }catch(e){}
     }
+    const isMini = !!(CONFIG.tenant && CONFIG.tenant.mode==='mini');
     app.innerHTML = '<h1>'+t('报名参加','Register')+'</h1>'
       + '<p class="muted">'+esc((CONFIG.tenant&&CONFIG.tenant.name)||'')+'</p>'
       + adminBlock
       + '<div class="panel" style="max-width:460px"><div id="regForm">'
-      + '<label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60">'
+      + (isMini ? '' : '<label>'+t('姓名','Name')+' *</label><input id="rgName" maxlength="60">')
       + '<label>'+t('邮箱','Email')+' *</label><input id="rgEmail" type="email" maxlength="254" placeholder="you@example.com">'
+      + (isMini ? '<p class="muted" style="margin:6px 0 0;font-size:13px">'+t('用户名将自动取自邮箱','Your display name is taken from your email')+'</p>' : '')
       + '<label>'+t('想法 / 找队友(可选)','Idea / looking for a team (optional)')+'</label><textarea id="rgNote" maxlength="300"></textarea>'
       + '<div class="row" style="margin-top:14px"><button id="rgBtn">'+t('提交报名','Register')+'</button></div>'
       + '<div id="rgMsg"></div></div></div>';
     $('#rgBtn').addEventListener('click', async ()=>{
-      const name=$('#rgName').value.trim(), email=$('#rgEmail').value.trim(), note=$('#rgNote').value.trim();
-      if(!name||!email){ setMsg('rgMsg', t('请填写姓名和邮箱','Name and email required'), true); return; }
+      const nameEl=$('#rgName'); const name=nameEl?nameEl.value.trim():''; const email=$('#rgEmail').value.trim(), note=$('#rgNote').value.trim();
+      if(!email||(!isMini&&!name)){ setMsg('rgMsg', isMini?t('请填写邮箱','Email required'):t('请填写姓名和邮箱','Name and email required'), true); return; }
       $('#rgBtn').disabled=true;
       try{ const r=await api('/api/tenant/register',{method:'POST',body:{name,email,note}});
         $('#regForm').innerHTML='<div class="notice ok">'+(r.already?t('你已经报名过了 ✓','You are already registered ✓'):t('报名成功!到时见 🎉','Registered! See you there 🎉'))+'</div>';
