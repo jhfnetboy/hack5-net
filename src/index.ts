@@ -3248,9 +3248,56 @@ const APP_HTML = String.raw`<!doctype html>
   ];
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
-  let LANG = lsGet('hv_lang') === 'en' ? 'en' : 'zh';
-  const t = (zh, en) => LANG === 'en' ? en : zh;
-  window.toggleLang = () => { LANG = LANG === 'en' ? 'zh' : 'en'; lsSet('hv_lang', LANG); document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN'; renderNav(); route(); };
+  let LANG = (lsGet('hv_lang') === 'en' || lsGet('hv_lang') === 'th') ? lsGet('hv_lang') : 'zh';
+  // Three languages: zh (source) / en (2nd arg of t) / th (TH dict, keyed by the zh string). Thai falls
+  // back to English then Chinese when a string isn't in TH yet, so coverage can grow without ever
+  // breaking a screen. All 597 t('中','英') call sites stay untouched — only lookup changes.
+  const t = (zh, en) => LANG === 'th' ? (TH[zh] || en || zh) : (LANG === 'en' ? en : zh);
+  const LANG_NEXT = { zh: 'en', en: 'th', th: 'zh' };            // toggle cycle
+  const LANG_LABEL = { zh: '中文', en: 'EN', th: 'ไทย' };          // label of a given lang
+  const LANG_HTMLLANG = { zh: 'zh-CN', en: 'en', th: 'th' };
+  window.toggleLang = () => { LANG = LANG_NEXT[LANG] || 'zh'; lsSet('hv_lang', LANG); document.documentElement.lang = LANG_HTMLLANG[LANG] || 'zh-CN'; renderNav(); route(); };
+  // Thai dictionary, keyed by the Chinese source string (first arg of t). Covers the mini participant
+  // journey (nav / register / my-hackathon / make / submit / gallery / common). Anything not here
+  // falls back to English — coverage grows incrementally without breaking screens.
+  const TH = {
+    // nav + common
+    '作品墙':'ผลงาน', '我的黑客松':'แฮกกาธอนของฉัน', '首页':'หน้าแรก', '海报':'โปสเตอร์',
+    '邀请码':'รหัสเชิญ', '评委':'กรรมการ', '用量':'การใช้งาน', '退出':'ออกจากระบบ',
+    '加载中…':'กำลังโหลด…', '查看':'ดู', '提交':'ส่ง', '发送':'ส่ง', '更多':'เพิ่มเติม',
+    '分享':'แชร์', '关于':'เกี่ยวกับ', '照片墙':'อัลบั้มภาพ', '作品':'ผลงาน',
+    '我是评委,去登录 →':'ฉันเป็นกรรมการ →', '导出 CSV':'ส่งออก CSV', '已报名':'ลงทะเบียนแล้ว',
+    // register
+    '报名参加':'ลงทะเบียนเข้าร่วม', '报名':'ลงทะเบียน', '姓名':'ชื่อ', '邮箱':'อีเมล',
+    '用户名将自动取自邮箱':'ชื่อที่แสดงจะดึงจากอีเมลของคุณ',
+    '想法 / 找队友(可选)':'ไอเดีย / หาเพื่อนร่วมทีม (ไม่บังคับ)',
+    '提交报名':'ส่งการลงทะเบียน', '请填写邮箱':'กรุณากรอกอีเมล',
+    '请填写姓名和邮箱':'กรุณากรอกชื่อและอีเมล', '请先完成人机验证':'กรุณายืนยันว่าไม่ใช่บอทก่อน',
+    '你已经报名过了 ✓':'คุณลงทะเบียนไว้แล้ว ✓', '报名成功!🎉':'ลงทะเบียนสำเร็จ! 🎉',
+    '下一步':'ขั้นต่อไป', '提交作品':'ส่งผลงาน', 'AI 做成应用':'ให้ AI สร้างเป็นแอป',
+    '去提交作品':'ไปส่งผลงาน',
+    '报名确认邮件已发到你的邮箱 📩(没收到看下垃圾箱)。贴上作品链接即可参赛,或让 AI 把想法做成能跑的应用。建议收藏本页 —— mini 无需登录密码,活动都在这里。':'ส่งอีเมลยืนยันการลงทะเบียนไปแล้ว 📩 (ถ้าไม่พบ ลองดูในโฟลเดอร์สแปม) ส่งลิงก์ผลงานเพื่อเข้าร่วม หรือให้ AI สร้างไอเดียของคุณเป็นแอปที่ใช้งานได้ แนะนำให้บุ๊กมาร์กหน้านี้ — mini ไม่ต้องใช้รหัสผ่าน ทุกอย่างอยู่ที่นี่',
+    // my-hackathon hub
+    '参与':'เข้าร่วม', '组队 · 找队友':'จับทีม · หาเพื่อน', '✨ 开始开发':'✨ เริ่มพัฒนา',
+    '未报名':'ยังไม่ได้ลงทะเบียน', '还没有提交作品':'ยังไม่ได้ส่งผลงาน',
+    '先「报名」即可参与这场黑客松。报名后,你的状态会显示在这里,并解锁「开始开发」。':'ลงทะเบียนด้านล่างเพื่อเข้าร่วมแฮกกาธอนนี้ เมื่อลงทะเบียนแล้ว สถานะของคุณจะแสดงที่นี่ และปลดล็อก「เริ่มพัฒนา」',
+    // make
+    '让 AI 帮我做成应用':'ให้ AI สร้างเป็นแอป',
+    '说说你的想法,AI 会追问补全;准备好后自动建公有仓库 + 编码 + 部署。':'เล่าไอเดียของคุณ AI จะถามต่อเพื่อเก็บรายละเอียด เมื่อพร้อมจะสร้างที่เก็บโค้ดสาธารณะ เขียนโค้ด และดีพลอยให้อัตโนมัติ',
+    '思考中…':'กำลังคิด…', '规格完备度':'ความสมบูรณ์ของสเปก', '可以开始生成':'พร้อมสร้าง',
+    '作品名称':'ชื่อผลงาน', '(英文,将同时作为仓库名)':'(ภาษาอังกฤษ — ใช้เป็นชื่อที่เก็บโค้ดด้วย)',
+    '联系邮箱':'อีเมลติดต่อ', '开始生成':'เริ่มสร้าง', '建仓 + 触发编码中…':'กำลังสร้างที่เก็บโค้ด…',
+    '请填作品名称和邮箱':'กรุณากรอกชื่อผลงานและอีเมล', '已排队构建!':'เข้าคิวสร้างแล้ว!',
+    '队列位':'คิว', '公有仓库':'ที่เก็บโค้ดสาธารณะ', '查看作品详情 →':'ดูรายละเอียดผลงาน →',
+    '编辑令牌':'โทเคนแก้ไข',
+    // submit (mini)
+    '作品链接':'ลิงก์ผลงาน', '一句话介绍':'แนะนำสั้นๆ', '截图':'ภาพหน้าจอ',
+    '队伍/昵称(可选)':'ทีม/ชื่อเล่น (ไม่บังคับ)', '你的作品是做什么的?':'ผลงานของคุณทำอะไร?',
+    'AI 帮我起名':'ให้ AI ตั้งชื่อ', 'AI 帮我写简介':'ให้ AI เขียนแนะนำ',
+    '提交中…':'กำลังส่ง…', '起名中…':'กำลังตั้งชื่อ…', '生成中…':'กำลังสร้าง…',
+    // gallery
+    '来交第一个':'มาส่งเป็นคนแรก',
+  };
 
   function initTheme(){
     const saved = lsGet('hv_theme');
@@ -3315,7 +3362,7 @@ const APP_HTML = String.raw`<!doctype html>
       } else {
         hp += '<button onclick="go(\'/start\')">'+t('发起黑客松','Start a hackathon')+'</button>';
       }
-      hp += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
+      hp += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN / ไทย">'+LANG_LABEL[LANG_NEXT[LANG]]+'</button>';
       n.innerHTML = hp; return;
     }
     // Participant-facing nav is intentionally minimal: the public gallery plus a single
@@ -3332,7 +3379,7 @@ const APP_HTML = String.raw`<!doctype html>
     } else {
       h += '<button onclick="go(\'/judge\')">'+t('评审入口','Judge login')+'</button>';
     }
-    h += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN">'+(LANG==='en'?'中文':'EN')+'</button>';
+    h += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN / ไทย">'+LANG_LABEL[LANG_NEXT[LANG]]+'</button>';
     n.innerHTML = h;
   }
 
