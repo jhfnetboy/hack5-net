@@ -2,6 +2,7 @@ import { FAVICON_SVG, OG_PNG_B64, APPLE_ICON_B64 } from "./assets";
 import qrcode from "qrcode-generator";
 import { createWorkbench, workbenchMockEnabled, mintScopedChatToken } from "./workbench";
 import { createParticipantRepo, mintRepoScopedPushToken, deleteParticipantRepo, validateRepoName, repoBotMockEnabled } from "./participant-repo";
+import { creditsEnabled, getBalance as getCreditBalance } from "./credits";
 
 interface Env {
   DB: D1Database;
@@ -55,6 +56,13 @@ interface Env {
   MINIAPP_LAUNCH_IP_CAP?: string; // per-IP daily build ceiling — default 3
   MINIAPP_LAUNCH_TENANT_CAP?: string; // per-tenant daily build ceiling — default 10
   MINIAPP_LAUNCH_GLOBAL_CAP?: string; // all-tenant daily build ceiling — default 30
+  // ---- Credits / token billing (mini /make) — see docs/credits-billing-design.md ----
+  CREDITS_ENABLED?: string; // "1"/"true" turns the feature on; off = current free-quota behaviour
+  CREDITS_API_URL?: string; // external credits API base (balance/reserve/settle/release, keyed by email)
+  CREDITS_API_SECRET?: string; // HMAC secret to sign requests to the credits API
+  CREDIT_USD_VALUE?: string; // dollars per credit (default 0.02)
+  CREDITS_MARKUP?: string; // markup multiplier over raw model cost (default 2)
+  CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
@@ -139,6 +147,7 @@ export default {
       if (path === "/api/tenant/participant/login/verify" && method === "POST") return participantLoginVerify(request, env, tenant, tid);
       if (path === "/api/tenant/participant/logout" && method === "POST") return participantLogout(request);
       if (path === "/api/tenant/me" && method === "GET") return participantMe(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/credits" && method === "GET") return miniCreditsBalance(request, env, tid);
 
       // ---- participant registration ----
       if (path === "/api/tenant/register" && method === "POST") return registerParticipant(request, env, tenant);
@@ -851,6 +860,21 @@ async function participantMe(request: Request, env: Env, tenant: Tenant | null, 
       ? { id: sub.id, projectName: sub.project_name, repoUrl: sub.repo_url, linkUrl: sub.link_url, buildState: sub.build_state, viewUrl: `/s/${sub.id}`, at: sub.created_at }
       : null,
   });
+}
+
+// The logged-in participant's credit balance, queried by email from the external credits system.
+// Scaffolding for the token-billing design (docs/credits-billing-design.md): when CREDITS_ENABLED is
+// off / unconfigured it returns {enabled:false} and nothing else changes. Balance is never held here.
+async function miniCreditsBalance(request: Request, env: Env, tid: string | null): Promise<Response> {
+  if (!creditsEnabled(env)) return json({ enabled: false });
+  const me = await getParticipant(request, env, tid);
+  if (!me || !tid) return json({ enabled: true, email: null, credits: null });
+  // Financial data: only a #47 email-verified session may read the balance. An unverified (registration-
+  // issued / legacy) session only proves the browser typed an email, not that it owns it — otherwise
+  // anyone could read a victim's credits by registering under their email (same class as #49/#50).
+  if (me.verified !== true) return json({ enabled: true, email: me.email, credits: null, verified: false });
+  const credits = await getCreditBalance(env, me.email);
+  return json({ enabled: true, email: me.email, credits });
 }
 
 // Auto-pick a clean subdomain for mini's 5-minute flow (only the name is asked). Prefer the bare
