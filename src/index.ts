@@ -706,6 +706,25 @@ function userCookie(request: Request, token: string, maxAge: number): string {
   return `${USER_COOKIE}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${maxAge}`;
 }
 
+// Auto-pick a clean subdomain for mini's 5-minute flow (only the name is asked). Prefer the bare
+// slug (`team-building`), then `-2`, `-3`… on collision, and only fall back to a random suffix if
+// every numbered variant up to 20 is taken. Guarantees a valid (3–30, non-reserved, unused) result.
+async function pickAvailableSubdomain(env: Env, base: string): Promise<string> {
+  const clip = (s: string) => s.slice(0, 30).replace(/-+$/, "");
+  const isFree = async (sub: string): Promise<boolean> => {
+    if (sub.length < 3 || RESERVED_SUBDOMAINS.has(sub)) return false;
+    const taken = await env.DB.prepare("SELECT id FROM tenants WHERE subdomain = ?").bind(sub).first();
+    return !taken;
+  };
+  const root = clip(base) || "mini";
+  if (await isFree(root)) return root;
+  for (let n = 2; n <= 20; n++) {
+    const cand = clip(`${base.slice(0, 27)}-${n}`);
+    if (await isFree(cand)) return cand;
+  }
+  return clip(`${base.slice(0, 25)}-${randomCodeBody(4).toLowerCase()}`);
+}
+
 async function createHackathon(request: Request, env: Env): Promise<Response> {
   const user = await getUser(request, env);
   if (!user) return json({ error: "请先登录 / Please log in" }, 401);
@@ -715,8 +734,8 @@ async function createHackathon(request: Request, env: Env): Promise<Response> {
   // Mini is a 5-minute flow: auto-generate a subdomain from the name if none given.
   let subdomain = String(body?.subdomain ?? "").trim().toLowerCase();
   if (mode === "mini" && !subdomain) {
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20) || "mini";
-    subdomain = `${slug}-${randomCodeBody(4).toLowerCase()}`.slice(0, 30);
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30) || "mini";
+    subdomain = await pickAvailableSubdomain(env, slug);
   }
   const intro = String(body?.intro ?? "").trim().slice(0, 2000);
   const accessDays = mode === "secret" ? Math.min(90, Math.max(1, Math.floor(Number(body?.accessDays) || 7))) : 7;
