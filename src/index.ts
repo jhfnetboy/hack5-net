@@ -869,6 +869,10 @@ async function miniCreditsBalance(request: Request, env: Env, tid: string | null
   if (!creditsEnabled(env)) return json({ enabled: false });
   const me = await getParticipant(request, env, tid);
   if (!me || !tid) return json({ enabled: true, email: null, credits: null });
+  // Financial data: only a #47 email-verified session may read the balance. An unverified (registration-
+  // issued / legacy) session only proves the browser typed an email, not that it owns it — otherwise
+  // anyone could read a victim's credits by registering under their email (same class as #49/#50).
+  if (me.verified !== true) return json({ enabled: true, email: me.email, credits: null, verified: false });
   const credits = await getCreditBalance(env, me.email);
   return json({ enabled: true, email: me.email, credits });
 }
