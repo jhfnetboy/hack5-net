@@ -1839,7 +1839,12 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
       }
     }
     if (!projectSlug) {
-      const pname = String(body?.projectName ?? input).trim().slice(0, 40) || "idea";
+      // One WorkBench client is shared per hackathon, so a project name derived from the idea text
+      // collides across participants who phrase the same idea — WorkBench then 400s "already exists"
+      // and the turn 502s. Append a short random suffix so each new conversation gets its own project;
+      // the returned projectSlug is echoed back to the client and reused on subsequent turns.
+      const base = String(body?.projectName ?? input).trim().slice(0, 32) || "idea";
+      const pname = `${base} ${randomCodeBody(4).toLowerCase()}`.slice(0, 40);
       const p = await wb.createProject(clientSlug, { name: pname, deliverableName: "app", deliverableType: "web" });
       projectSlug = p.project.slug;
     }
