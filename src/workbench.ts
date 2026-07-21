@@ -108,6 +108,7 @@ export interface ChatInput {
   clientSlug: string;
   projectSlug: string;
   input: string;
+  lang?: "zh" | "en" | "th"; // participant UI locale — AI replies in this language (default zh, back-compat)
   attachments?: unknown[];
 }
 export interface CommitInput {

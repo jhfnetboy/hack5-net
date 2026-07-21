@@ -1938,9 +1938,12 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
   // Absolute platform-wide backstop: caps total LLM spend even if an attacker spreads across many
   // tenants/IPs. Per-IP + per-tenant caps above bound a single source; this bounds the whole day.
   if (!(await bumpDailyCap(env, `miniapp:chat:global:${day}`, capNum(env.MINIAPP_CHAT_GLOBAL_CAP, 3000)))) return json({ error: "系统今日对话已达上限,请明天再来 / Service daily chat limit reached" }, 429);
-  const body = await request.json<{ clientSlug?: string; projectSlug?: string; input?: string; projectName?: string }>().catch(() => null);
+  const body = await request.json<{ clientSlug?: string; projectSlug?: string; input?: string; projectName?: string; lang?: string }>().catch(() => null);
   const input = String(body?.input ?? "").trim().slice(0, 1000);
   if (!input) return json({ error: "请说说你的想法 / Describe your idea" }, 400);
+  // Internal communication language: the AI replies in the participant's UI language (WorkBench chat
+  // supports lang; default zh, back-compatible). Only forward a known value.
+  const lang = body?.lang === "en" || body?.lang === "th" ? body.lang : "zh";
   const wb = createWorkbench(env);
   let clientSlug = String(body?.clientSlug ?? "").trim();
   let projectSlug = String(body?.projectSlug ?? "").trim();
@@ -1967,7 +1970,7 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
       projectSlug = p.project.slug;
     }
     const scoped = await mintScopedChatToken(env, clientSlug, projectSlug);
-    const res = await wb.chat({ clientSlug, projectSlug, input }, { scopedToken: scoped });
+    const res = await wb.chat({ clientSlug, projectSlug, input, lang }, { scopedToken: scoped });
     return json({ ok: true, clientSlug, projectSlug, readiness: res.result.readiness, reply: res.result.reply ?? "" });
   } catch {
     return json({ error: "WorkBench 暂不可用,请稍后再试 / WorkBench unavailable" }, 502);
@@ -4826,7 +4829,7 @@ const APP_HTML = String.raw`<!doctype html>
       msgs.push({who:'me',text:input}); addMsg('me', input); renderTools();
       $('#chatIn').value=''; $('#chatSend').disabled=true; setMsg('chatMsg', t('思考中…','Thinking…'));
       try{
-        const r=await api('/api/tenant/mini/app/chat',{method:'POST',body:{clientSlug,projectSlug,input}});
+        const r=await api('/api/tenant/mini/app/chat',{method:'POST',body:{clientSlug,projectSlug,input,lang:LANG}});
         clientSlug=r.clientSlug; projectSlug=r.projectSlug;
         if(r.reply){ msgs.push({who:'ai',text:r.reply}); addMsg('ai', r.reply); }
         renderReady(r.readiness); setMsg('chatMsg','');
