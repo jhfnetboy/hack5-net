@@ -64,6 +64,7 @@ interface Env {
   CREDITS_MARKUP?: string; // markup multiplier over raw model cost (default 2)
   CREDITS_PER_1K_TOKENS?: string; // fallback flat rate when actual $ cost isn't reported
   CREDITS_SIGNUP_GRANT?: string; // credits granted to a new participant on first registration (default 300)
+  CREDITS_LAUNCH_HOLD?: string; // credits reserved up-front for a paid build; settled to actual cost (default 30)
 }
 
 type Auth = { role: "judge" | "admin"; name: string; jid: string; tenant: string; exp: number };
@@ -1897,20 +1898,24 @@ async function wbCallback(request: Request, env: Env): Promise<Response> {
       .bind(state, appUrl, repo, repo, unixNow(), row.id)
       .run();
   }
-  // The coding loop is done — record this build's actual cost (from WorkBench usage) into the credit
-  // ledger, per participant. Accounting only for now: charging a balance requires a verified account
-  // (a #47-verified session), else an attacker could launch under email=victim and drain their
-  // credits — so live deduction is a follow-up gated on the verified-login flow. Best-effort.
+  // The coding loop finished — reconcile credits. On `deployed`, settle the reserved hold to the build's
+  // actual cost (from WorkBench usage), refunding the overheld part; on `failed`, release the hold so a
+  // failed build costs nothing. Free (unreserved) builds are just recorded for accounting. Best-effort:
+  // never fails the callback. Charging is safe because the hold was placed on a verified owning account.
   if (state === "deployed" && row.email) {
-    await recordBuildCost(env, row.id, row.email, row.tenant_id ?? "", clientSlug, projectSlug);
+    await settleBuildCost(env, row.id, row.email, row.tenant_id ?? "", clientSlug, projectSlug);
+  } else if (state === "failed") {
+    await releaseBuildHold(env, clientSlug, projectSlug);
   }
   return json({ ok: true, id: row.id, state: advance ? state : current, applied: advance });
 }
 
-// Pull a finished build's real USD cost from WorkBench /api/usage and record it (credits = actual
-// cost × 2 ÷ $0.02) in credit_ledger, one row per submission (idempotent). Never throws — a metering
-// hiccup must not fail the callback. Does NOT deduct a balance (see wbCallback note).
-async function recordBuildCost(env: Env, submissionId: string, email: string, tenantId: string, clientSlug: string, projectSlug: string): Promise<void> {
+// Settle a finished build: read its real USD cost from WorkBench /api/usage, convert to credits
+// (ceil(costUsd*2/0.02) = ceil(costUsd*100)), and if a hold was reserved at launch, refund the
+// difference (or charge a little more, floored at 0 — never overdraws) and mark it settled. A free
+// build (no hold) is just recorded for accounting. Idempotent (claims the 'reserved' row atomically);
+// never throws.
+async function settleBuildCost(env: Env, submissionId: string, email: string, tenantId: string, clientSlug: string, projectSlug: string): Promise<void> {
   try {
     const wb = createWorkbench(env);
     const u = (await wb.usage(clientSlug)) as unknown as {
@@ -1919,15 +1924,54 @@ async function recordBuildCost(env: Env, submissionId: string, email: string, te
     const entry = Array.isArray(u?.perProject) ? u.perProject.find((p) => p.project === projectSlug) : undefined;
     const costUsd = Number(entry?.usage?.costUsd ?? 0);
     const tokens = Number(entry?.usage?.inputTokens ?? 0) + Number(entry?.usage?.outputTokens ?? 0);
-    const credits = costUsdToCredits(env, costUsd);
+    const actual = costUsdToCredits(env, costUsd);
     const now = unixNow();
+    const holdId = `hold:${clientSlug}/${projectSlug}`;
+    const hold = await env.DB.prepare("SELECT email, credits FROM credit_ledger WHERE id = ? AND status = 'reserved'")
+      .bind(holdId)
+      .first<{ email: string; credits: number }>();
+    if (hold) {
+      // Claim the hold atomically so a duplicate callback can't settle twice.
+      const claimed = await env.DB.prepare("UPDATE credit_ledger SET status = 'settled', credits = ?, tokens = ?, updated_at = ? WHERE id = ? AND status = 'reserved'")
+        .bind(actual, tokens, now, holdId)
+        .run();
+      if (claimed.meta.changes === 1) {
+        const delta = hold.credits - actual; // >0 refund overheld; <0 charge a little more (floored at 0)
+        if (delta > 0) {
+          await env.DB.prepare("UPDATE participant_credits SET credits = credits + ?, updated_at = ? WHERE email = ?").bind(delta, now, hold.email).run();
+        } else if (delta < 0) {
+          await env.DB.prepare("UPDATE participant_credits SET credits = MAX(0, credits - ?), updated_at = ? WHERE email = ?").bind(-delta, now, hold.email).run();
+        }
+      }
+      return;
+    }
+    // Free build (no hold): record cost for accounting only, no balance change.
     await env.DB.prepare(
       "INSERT OR IGNORE INTO credit_ledger (id, tenant_id, email, kind, status, tokens, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'build', 'recorded', ?, ?, ?, ?, ?)",
     )
-      .bind(`build:${submissionId}`, tenantId, email, tokens, credits, `${clientSlug}/${projectSlug}`, now, now)
+      .bind(`build:${submissionId}`, tenantId, email, tokens, actual, `${clientSlug}/${projectSlug}`, now, now)
       .run();
   } catch (err) {
-    console.log("recordBuildCost error", String(err));
+    console.log("settleBuildCost error", String(err));
+  }
+}
+
+// Release a reserved hold (build failed / provisioning failed) — refund the full hold and mark it
+// released. Idempotent: only a still-'reserved' row is refunded, so a retry can't double-refund.
+async function releaseBuildHold(env: Env, clientSlug: string, projectSlug: string): Promise<void> {
+  try {
+    const holdId = `hold:${clientSlug}/${projectSlug}`;
+    const hold = await env.DB.prepare("SELECT email, credits FROM credit_ledger WHERE id = ? AND status = 'reserved'")
+      .bind(holdId)
+      .first<{ email: string; credits: number }>();
+    if (!hold) return;
+    const now = unixNow();
+    const claimed = await env.DB.prepare("UPDATE credit_ledger SET status = 'released', updated_at = ? WHERE id = ? AND status = 'reserved'").bind(now, holdId).run();
+    if (claimed.meta.changes === 1) {
+      await env.DB.prepare("UPDATE participant_credits SET credits = credits + ?, updated_at = ? WHERE email = ?").bind(hold.credits, now, hold.email).run();
+    }
+  } catch (err) {
+    console.log("releaseBuildHold error", String(err));
   }
 }
 
@@ -2047,8 +2091,31 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
   const launchKey = `miniapp:launch:${tid}:${repoKey}`;
   const launched = Number((await env.SHOTS.get(launchKey)) ?? "0");
   const FREE_LAUNCHES = 1;
+  // Beyond the free build, charge credits. Real-time, no overdraft: reserve a hold up-front (atomic
+  // conditional deduct — can't reserve more than the balance), then settle to the build's actual cost
+  // on the deployed callback (refunding the overheld part) or release it if the build fails. The hold
+  // is charged to a VERIFIED account owning this email, so nobody can drain a victim's credits by
+  // launching under their address (pr-daemon's gate).
+  let creditHold = 0;
   if (launched >= FREE_LAUNCHES) {
-    return json({ error: "免费额度已用完(每人首场免费),请充值后再生成 / Free quota used — top up to build more", pricingUrl: "/pricing" }, 402);
+    const me = await getParticipant(request, env, tid);
+    if (!(me?.verified === true && me.email === email)) {
+      return json({ error: "免费额度已用完。请在「我的黑客松」验证邮箱后用积分继续 / Free quota used — verify your email in My hackathon to continue with credits", upgrade: true, needVerify: true }, 402);
+    }
+    const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
+    const now0 = unixNow();
+    const held = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
+      .bind(hold, now0, email, hold)
+      .run();
+    if (held.meta.changes !== 1) {
+      return json({ error: "积分不足,请充值后再生成 / Not enough credits — top up to build more", pricingUrl: "/pricing", upgrade: true }, 402);
+    }
+    creditHold = hold;
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO credit_ledger (id, tenant_id, email, kind, status, tokens, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'build', 'reserved', 0, ?, ?, ?, ?)",
+    )
+      .bind(`hold:${clientSlug}/${projectSlug}`, tid, email, hold, `${clientSlug}/${projectSlug}`, now0, now0)
+      .run();
   }
 
   const wb = createWorkbench(env);
@@ -2061,6 +2128,8 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
     jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl })).jobId;
     queuePos = (await wb.run(jobId)).queuePos;
   } catch {
+    // Provisioning failed before any real work — release the reserved hold so credits aren't lost.
+    if (creditHold > 0) await releaseBuildHold(env, clientSlug, projectSlug).catch(() => {});
     return json({ error: "建仓或触发编码失败,请稍后再试 / Provisioning failed" }, 502);
   }
   // Count this build against the participant's quota only after successful provisioning.

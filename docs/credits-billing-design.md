@@ -6,7 +6,9 @@
 
 **先不接外部积分 API,hack5 自己持有余额** —— 每个参赛者 email 一个本地积分账户(`participant_credits` 表,全局跨活动),**注册时默认发 `CREDITS_SIGNUP_GRANT`(默认 300)积分**,`INSERT OR IGNORE` 保证每 email 只发一次。`GET /api/tenant/mini/credits`(#47 验证会话)读本地余额。充值成本 / 充值入口待定。
 
-> 下面第 2 节的**外部积分 API**是后续可选路径(若积分要跨系统流通再接);现阶段 hack5 本地库即权威。扣费(spending)待 WorkBench 回传每 job `costUsd` 后接(见 §5)。
+> 下面第 2 节的**外部积分 API**是后续可选路径(若积分要跨系统流通再接);现阶段 hack5 本地库即权威。
+
+**扣费(live spend)已实现**:超免费额度的 build → 要求**已验证会话**(email 本人)→ launch 前 `reserve` 一个 hold(`CREDITS_LAUNCH_HOLD` 默认 30 积分,原子条件扣减,**扣不到负**)→ deployed 回调按 `/api/usage` 的实际 `costUsd` `settle`(退多占)→ 失败/建仓失败 `release`(全退)。全程 gate 在已验证账户(防越权扣他人积分),幂等(claim `reserved` 行),best-effort 不拖垮回调。参赛者验证登录 UI 见 #60。
 
 ## 1. 概念
 
