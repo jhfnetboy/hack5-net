@@ -122,6 +122,10 @@ export interface PlanInput {
   clientSlug: string;
   projectSlug: string;
   repo: string;
+  // CC-59 inline-spec build: when present, loop-engineer writes this markdown as SPEC.md in its own
+  // container and builds directly from it (no fde-copilot commit, no repo read). Omitted → loop reads
+  // the spec from the repo as before. ≤512KB (enforced by loop-engineer and by the caller).
+  spec?: string;
 }
 export interface DeployInput {
   clientSlug: string;

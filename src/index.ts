@@ -198,6 +198,7 @@ export default {
       // A3 — mini「做成应用」: multi-turn chat → repo provisioning + trigger loop
       if (path === "/api/tenant/mini/app/chat" && method === "POST") return miniAppChat(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/launch" && method === "POST") return miniAppLaunch(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/app/launch-spec" && method === "POST") return miniAppLaunchSpec(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/deploy" && method === "POST") return miniAppDeploy(request, env, tenant, tid);
       // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
       if (path === "/api/wb/usage-selftest" && method === "GET") return usageSelftest(env);
@@ -2163,6 +2164,118 @@ async function miniAppLaunch(request: Request, env: Env, tenant: Tenant | null, 
       .run();
   }
   return json({ ok: true, id, editToken, viewUrl: `/s/${id}`, repoUrl: repo.htmlUrl, jobId, queuePos });
+}
+
+// CC-59 — "upload a ready spec (markdown) → one-click build", skipping the multi-turn chat. The user
+// already has a markdown (e.g. the transcript they downloaded from /make); we provision the WorkBench
+// client/project + their public repo, then hand the markdown to loop-engineer's inline-spec /plan
+// (POST /plan { clientSlug, projectSlug, repo, spec }) — loop writes it as SPEC.md in its own container
+// and builds directly (no fde-copilot commit, no separate /run). Reuses the same abuse caps, free-quota
+// + credit-hold, submission identity, and W5 build-status callbacks as the chat-driven launch.
+async function miniAppLaunchSpec(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const body = await request.json<{ repoName?: string; email?: string; projectName?: string; spec?: string }>().catch(() => null);
+  const email = normalizeEmail(body?.email);
+  const spec = String(body?.spec ?? "");
+  if (!spec.trim()) return json({ error: "请上传 spec(markdown 全文) / Upload a spec (full markdown)" }, 400);
+  // Match loop-engineer's 512KB cap, measured in UTF-8 bytes (a Chinese spec is ~3 bytes/char).
+  if (utf8(spec).length > 512 * 1024) return json({ error: "spec 过大(上限 512KB) / spec too large (512KB max)" }, 400);
+  if (!email) return json({ error: "请填写有效邮箱 / Valid email required" }, 400);
+  const nameCheck = validateRepoName(body?.repoName);
+  if (!nameCheck.ok || !nameCheck.name) return json({ error: nameCheck.error || "仓库名不合法 / Invalid repo name" }, 400);
+  const repoName = nameCheck.name;
+  const projectName = (String(body?.projectName ?? "").trim().slice(0, 80) || repoName).slice(0, 80);
+  const idea = spec.trim().replace(/\s+/g, " ").slice(0, 300); // short description drawn from the spec head
+
+  // Same identity-independent abuse caps as the chat-driven launch (per-IP / per-tenant / global daily).
+  const day = Math.floor(unixNow() / 86400);
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  const ipHash = (await hmacHex(utf8(env.AUTH_SECRET), `miniappip:${ip}`)).slice(0, 24);
+  if (!(await bumpDailyCap(env, `miniapp:launch:ip:${ipHash}:${day}`, capNum(env.MINIAPP_LAUNCH_IP_CAP, 3)))) return json({ error: "今日生成次数已达上限,请明天再来 / Daily build limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:launch:t:${tid}:${day}`, capNum(env.MINIAPP_LAUNCH_TENANT_CAP, 10)))) return json({ error: "本场今日生成已达上限 / Event daily build limit reached" }, 429);
+  if (!(await bumpDailyCap(env, `miniapp:launch:global:${day}`, capNum(env.MINIAPP_LAUNCH_GLOBAL_CAP, 30)))) return json({ error: "系统今日生成已达上限,请明天再来 / Service daily build limit reached" }, 429);
+
+  const wb = createWorkbench(env);
+  // No prior chat → provision the WorkBench client (one per tenant, cached) + a fresh project here.
+  let clientSlug: string, projectSlug: string;
+  try {
+    const cached = await env.SHOTS.get(`miniapp:wbclient:${tid}`);
+    if (cached) {
+      clientSlug = cached;
+    } else {
+      const c = await wb.createClient({ name: tenant.name || tenant.subdomain, background: "hack5 mini hackathon" });
+      clientSlug = c.client.slug;
+      await env.SHOTS.put(`miniapp:wbclient:${tid}`, clientSlug, { expirationTtl: 30 * 86400 });
+    }
+    const pname = `${repoName} ${randomCodeBody(4).toLowerCase()}`.slice(0, 40);
+    const p = await wb.createProject(clientSlug, { name: pname, deliverableName: "app", deliverableType: "web" });
+    projectSlug = p.project.slug;
+  } catch {
+    return json({ error: "WorkBench 暂不可用,请稍后再试 / WorkBench unavailable" }, 502);
+  }
+
+  const owner = "mini";
+  const repoKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${email}`)).slice(0, 40);
+  const launchKey = `miniapp:launch:${tid}:${repoKey}`;
+  const launched = Number((await env.SHOTS.get(launchKey)) ?? "0");
+  const FREE_LAUNCHES = 1;
+  let creditHold = 0;
+  if (launched >= FREE_LAUNCHES) {
+    const me = await getParticipant(request, env, tid);
+    if (!(me?.verified === true && me.email === email)) {
+      return json({ error: "免费额度已用完。请在「我的黑客松」验证邮箱后用积分继续 / Free quota used — verify your email in My hackathon to continue with credits", upgrade: true, needVerify: true }, 402);
+    }
+    const hold = Math.max(1, Math.floor(Number(env.CREDITS_LAUNCH_HOLD ?? "30")) || 30);
+    const now0 = unixNow();
+    const held = await env.DB.prepare("UPDATE participant_credits SET credits = credits - ?, updated_at = ? WHERE email = ? AND credits >= ?")
+      .bind(hold, now0, email, hold)
+      .run();
+    if (held.meta.changes !== 1) {
+      return json({ error: "积分不足,请充值后再生成 / Not enough credits — top up to build more", pricingUrl: "/pricing", upgrade: true }, 402);
+    }
+    creditHold = hold;
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO credit_ledger (id, tenant_id, email, kind, status, tokens, credits, wb_ref, created_at, updated_at) VALUES (?, ?, ?, 'build', 'reserved', 0, ?, ?, ?, ?)",
+    )
+      .bind(`hold:${clientSlug}/${projectSlug}`, tid, email, hold, `${clientSlug}/${projectSlug}`, now0, now0)
+      .run();
+  }
+
+  let repo, jobId: string;
+  try {
+    repo = await createParticipantRepo(env, repoName, { description: idea || projectName });
+    // Inline-spec build (contract fixed by repo:workbench, CC-59): loop-engineer writes `spec` as
+    // SPEC.md in its own container and runs plan→build directly. No fde-copilot commit, no /run; push
+    // to loop/integration is handled loop-side via the admin token.
+    jobId = (await wb.plan({ clientSlug, projectSlug, repo: repo.cloneUrl, spec })).jobId;
+  } catch {
+    if (creditHold > 0) await releaseBuildHold(env, clientSlug, projectSlug).catch(() => {});
+    return json({ error: "建仓或触发构建失败,请稍后再试 / Provisioning failed" }, 502);
+  }
+  await env.SHOTS.put(launchKey, String(launched + 1), { expirationTtl: 400 * 86400 });
+
+  const now = unixNow();
+  const existing = await env.DB.prepare("SELECT id, edit_token FROM submissions WHERE tenant_id = ? AND repo_owner = ? AND repo_name = ?")
+    .bind(tid, owner, repoKey)
+    .first<{ id: string; edit_token: string }>();
+  let id: string, editToken: string;
+  if (existing) {
+    id = existing.id;
+    editToken = existing.edit_token;
+    await env.DB.prepare("UPDATE submissions SET project_name = ?, email = ?, link_url = ?, description = ?, repo_url = ?, wb_client = ?, wb_project = ?, build_state = 'queued', updated_at = ? WHERE id = ?")
+      .bind(projectName, email, repo.htmlUrl, idea, repo.htmlUrl, clientSlug, projectSlug, now, id)
+      .run();
+  } else {
+    id = crypto.randomUUID();
+    editToken = randomToken(18);
+    const shareToken = randomToken(16);
+    await env.DB.prepare(
+      "INSERT INTO submissions (id, tenant_id, project_name, team_name, email, repo_owner, repo_name, repo_url, description, video_url, shot_count, shots_meta, share_token, edit_token, link_url, status, created_at, updated_at, wb_client, wb_project, build_state) VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, '', 0, '[]', ?, ?, ?, 'ready', ?, ?, ?, ?, 'queued')",
+    )
+      .bind(id, tid, projectName, email, owner, repoKey, repo.htmlUrl, idea, shareToken, editToken, repo.htmlUrl, now, now, clientSlug, projectSlug)
+      .run();
+  }
+  return json({ ok: true, id, editToken, viewUrl: `/s/${id}`, repoUrl: repo.htmlUrl, jobId });
 }
 
 // CC-56 — participant "one-click deploy". Once the build reached `reviewing` (coding_done: code is
@@ -5010,6 +5123,13 @@ const APP_HTML = String.raw`<!doctype html>
     function loadDraft(){ try{ const raw=lsGet(DKEY); if(!raw) return null; const d=JSON.parse(raw); return (d && Array.isArray(d.msgs) && d.msgs.length) ? d : null; }catch(e){ return null; } }
     app.innerHTML = '<h1>✨ '+t('让 AI 帮我做成应用','Turn your idea into an app')+'</h1>'
       + '<div class="notice">'+t('说说你的想法,AI 会追问补全;准备好后自动建公有仓库 + 编码 + 部署。','Describe your idea — the AI asks follow-ups, then provisions a public repo, codes and deploys it.')+'</div>'
+      + '<details class="panel" style="max-width:680px;margin-bottom:10px"><summary style="cursor:pointer;font-weight:650">📄 '+t('已有 spec / 下载好的对话?直接上传构建(跳过聊天)','Have a spec / downloaded chat? Upload it to build — skip the chat')+'</summary>'
+      +   '<div style="margin-top:10px">'
+      +     '<p class="muted" style="font-size:13px">'+t('上传你从本页「下载对话」得到的 markdown(或任何 spec,≤512KB)—— 直接建仓 + 构建,不用重聊。','Upload the markdown you got from “Download chat” here (or any spec, ≤512KB) — it provisions a repo and builds directly, no re-chat.')+'</p>'
+      +     '<input id="specFile" type="file" accept=".md,.markdown,text/markdown,text/plain">'
+      +     '<div id="specForm" style="margin-top:10px"></div>'
+      +     '<div id="specMsg" class="muted" style="margin-top:6px;font-size:12px"></div>'
+      +   '</div></details>'
       + '<div class="panel" style="max-width:680px">'
       + '<div id="chatLog" style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px"></div>'
       + '<div id="readyBar" style="margin-bottom:8px"></div>'
@@ -5100,6 +5220,35 @@ const APP_HTML = String.raw`<!doctype html>
     }
     $('#chatSend').addEventListener('click', send);
     $('#chatIn').addEventListener('keydown', e=>{ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(); } });
+    // CC-59 — upload a ready spec (markdown) → one-click build, skipping the chat. Reads the file text,
+    // then asks for a repo name + email and calls the inline-spec launch (server hands it to loop /plan).
+    let uploadedSpec='';
+    const specFileEl=$('#specFile');
+    if(specFileEl) specFileEl.addEventListener('change', async ev=>{
+      const f=ev.target.files[0]; ev.target.value=''; if(!f) return;
+      if(f.size > 512*1024){ setMsg('specMsg', t('文件过大(上限 512KB)','File too large (512KB max)'), true); $('#specForm').innerHTML=''; return; }
+      try{
+        uploadedSpec = await f.text();
+        if(!uploadedSpec.trim()){ setMsg('specMsg', t('文件是空的','File is empty'), true); $('#specForm').innerHTML=''; return; }
+        setMsg('specMsg', t('已读取 ','Loaded ')+Math.max(1,Math.round(uploadedSpec.length/1024))+'KB · '+f.name);
+        $('#specForm').innerHTML =
+            '<label>'+t('作品名称','Project name')+' * <span class="muted">'+t('(英文,将同时作为仓库名)','(English — also the repo name)')+'</span></label><input id="specRepo" maxlength="39" placeholder="my-cool-app">'
+          + '<label>'+t('联系邮箱','Contact email')+' *</label><input id="specEmail" type="email" maxlength="254" placeholder="you@example.com">'
+          + '<div class="row" style="margin-top:10px"><button id="specGo">🚀 '+t('用这份 spec 构建','Build from this spec')+'</button></div>';
+        $('#specGo').addEventListener('click', async ()=>{
+          const repoName=$('#specRepo').value.trim(), email=$('#specEmail').value.trim();
+          if(!repoName||!email){ setMsg('specMsg', t('请填作品名称和邮箱','Project name and email required'), true); return; }
+          $('#specGo').disabled=true; setMsg('specMsg', t('建仓 + 触发构建中…','Provisioning…'));
+          try{
+            const r=await api('/api/tenant/mini/app/launch-spec',{method:'POST',body:{repoName,email,projectName:repoName,spec:uploadedSpec}});
+            $('#specForm').innerHTML = '<div class="notice ok">🎉 '+t('已排队构建!','Queued!')+'<br>'
+              + t('公有仓库','Repo')+': <a href="'+esc(r.repoUrl)+'" target="_blank" rel="noopener">'+esc(r.repoUrl)+'</a ><br>'
+              + '<a href="'+esc(r.viewUrl)+'" onclick="go(\''+esc(r.viewUrl)+'\');return false">'+t('查看作品详情 →','View project →')+'</a > · '+t('编辑令牌','Edit token')+': <code>'+esc(r.editToken)+'</code></div>';
+            setMsg('specMsg','');
+          }catch(e){ setMsg('specMsg', e.message, true); $('#specGo').disabled=false; }
+        });
+      }catch(e){ setMsg('specMsg', t('读取失败','Read failed'), true); }
+    });
   }
   async function renderMiniSubmit(){
     if(!CONFIG.tenant){ go('/'); return; }
