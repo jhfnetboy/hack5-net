@@ -24,7 +24,7 @@
     }
   ],
   "vars": {
-    "APP_NAME": "hack5",
+    "APP_NAME": "Hack5",
     "EVENT_NAME": "Hackathon",
     "VIDEO_UPLOAD": "off",
     "MAX_VIDEO_BYTES": "83886080",

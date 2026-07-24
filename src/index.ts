@@ -315,7 +315,7 @@ async function getConfig(request: Request, env: Env): Promise<Response> {
   // so the client can render the access-code page — never the intro/details/submissions.
   const gated = mode === "secret" && !(await hasSecretAccess(request, env, tctx.tenant));
   return json({
-    appName: env.APP_NAME || "hack5",
+    appName: env.APP_NAME || "Hack5",
     country: request.cf?.country ?? null,
     turnstileSiteKey: env.TURNSTILE_SITEKEY ?? null,
     platform: tctx.platform,
@@ -1026,7 +1026,7 @@ async function sendHackathonReadyEmail(env: Env, email: string, name: string, ur
     `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
     `<table role="presentation" width="460" cellpadding="0" cellspacing="0" style="max-width:460px;width:100%">` +
-    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#0a0e0a;border-radius:11px;color:#25ff86;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14161c;vertical-align:middle;padding-left:10px">hack5</span></td></tr>` +
+    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></td></tr>` +
     `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
     `<h1 style="font-size:20px;margin:0 0 6px;color:#14161c">${escapeHtml(name)} ` + `<span style="color:#0f9d6b">✓</span></h1>` +
     `<p style="color:#5f6675;font-size:15px;margin:0 0 16px">你的黑客松已就绪 · Your hackathon is live</p>` +
@@ -1045,7 +1045,7 @@ async function sendHackathonReadyEmail(env: Env, email: string, name: string, ur
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 你的黑客松「${name}」已就绪`, text, html }),
+      body: JSON.stringify({ from: env.MAIL_FROM || "Hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 你的黑客松「${name}」已就绪`, text, html }),
     });
     if (!res.ok) console.log("ready-email send failed", res.status, (await res.text().catch(() => "")).slice(0, 200));
   } catch (err) {
@@ -1082,7 +1082,7 @@ async function sendRegistrationConfirmEmail(
     `<div style="background:#f6f7fb;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">` +
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
     `<table role="presentation" width="460" cellpadding="0" cellspacing="0" style="max-width:460px;width:100%">` +
-    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#0a0e0a;border-radius:11px;color:#25ff86;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14161c;vertical-align:middle;padding-left:10px">hack5</span></td></tr>` +
+    `<tr><td align="center" style="padding-bottom:20px"><span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span><span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span></td></tr>` +
     `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
     `<h1 style="font-size:20px;margin:0 0 6px;color:#14161c">${escapeHtml(hackathonName)} <span style="color:#0f9d6b">✓</span></h1>` +
     `<p style="color:#5f6675;font-size:15px;margin:0 0 14px">报名成功 · You are registered</p>` +
@@ -1098,7 +1098,7 @@ async function sendRegistrationConfirmEmail(
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 报名成功 · ${hackathonName}`, text, html }),
+      body: JSON.stringify({ from: env.MAIL_FROM || "Hack5 <no-reply@hack5.net>", to: [email], subject: `‹5› 报名成功 · ${hackathonName}`, text, html }),
     });
     if (!res.ok) console.log("register-confirm send failed", res.status, (await res.text().catch(() => "")).slice(0, 200));
   } catch (err) {
@@ -1131,8 +1131,8 @@ async function sendEmailCode(env: Env, email: string, code: string): Promise<boo
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
     `<table role="presentation" width="440" cellpadding="0" cellspacing="0" style="max-width:440px;width:100%">` +
     `<tr><td align="center" style="padding-bottom:22px">` +
-    `<span style="display:inline-block;width:40px;height:40px;line-height:40px;background:#0a0e0a;border-radius:11px;color:#25ff86;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span>` +
-    `<span style="font-size:22px;font-weight:800;color:#14161c;vertical-align:middle;padding-left:10px">hack5</span>` +
+    `<span style="display:inline-block;width:40px;height:40px;line-height:38px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);box-sizing:border-box;border-radius:11px;color:#14532d;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:800;font-size:18px;text-align:center;vertical-align:middle">&#8249;5&#8250;</span>` +
+    `<span style="font-size:22px;font-weight:800;color:#14532d;vertical-align:middle;padding-left:10px">Hack5</span>` +
     `</td></tr>` +
     `<tr><td style="background:#ffffff;border-radius:14px;padding:30px 28px;border:1px solid #e6e9f0">` +
     `<p style="color:#5f6675;font-size:15px;margin:0 0 10px">你的 hack5 登录验证码 · Your login code</p>` +
@@ -1151,7 +1151,7 @@ async function sendEmailCode(env: Env, email: string, code: string): Promise<boo
       const res = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ from: env.MAIL_FROM || "hack5 <no-reply@hack5.net>", to: [email], subject: "‹5› hack5 登录验证码 · 10 分钟发起你的黑客松", text, html }),
+        body: JSON.stringify({ from: env.MAIL_FROM || "Hack5 <no-reply@hack5.net>", to: [email], subject: "‹5› Hack5 登录验证码 · 10 分钟发起你的黑客松", text, html }),
       });
       if (!res.ok) {
         console.log("resend send failed", res.status, (await res.text().catch(() => "")).slice(0, 200));
@@ -3215,20 +3215,20 @@ const APP_HTML = String.raw`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>&#8249;5&#8250; hack5: Launch Your Hackathon!</title>
-  <meta name="description" content="hack5 — 10 分钟发起并部署属于你自己的黑客松站点:报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
+  <title>&#8249;5&#8250; Hack5: Launch Your Hackathon!</title>
+  <meta name="description" content="Hack5 — 10 分钟发起并部署属于你自己的黑客松站点:报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="hack5">
-  <meta property="og:title" content="hack5 · 10 分钟发起你的黑客松">
+  <meta property="og:site_name" content="Hack5">
+  <meta property="og:title" content="Hack5 · 10 分钟发起你的黑客松">
   <meta property="og:description" content="报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。Launch your own hackathon in 10 minutes.">
   <meta property="og:image" content="https://hack5.net/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:url" content="https://hack5.net">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="hack5 · 10 分钟发起你的黑客松">
+  <meta name="twitter:title" content="Hack5 · 10 分钟发起你的黑客松">
   <meta name="twitter:description" content="报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
   <meta name="twitter:image" content="https://hack5.net/og.png">
   <style>
@@ -3245,6 +3245,8 @@ const APP_HTML = String.raw`<!doctype html>
     .ghost:hover{background:var(--ghost-hover)}
     header{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px clamp(16px,4vw,48px);background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
     .brand{display:flex;align-items:center;gap:10px;font-weight:800;cursor:pointer}
+    #brandName{color:#14532d}
+    :root[data-theme="dark"] #brandName{color:#5fd39a}
     .mark{width:30px;height:30px;border-radius:8px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:13px}
     nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     nav .who{color:var(--muted);font-size:13px;margin-right:4px}
@@ -3365,7 +3367,7 @@ const APP_HTML = String.raw`<!doctype html>
     .hero-banner img{width:100%;height:100%;object-fit:cover;display:block}
     .hero-default{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;
       background:radial-gradient(120% 140% at 82% 8%,rgba(91,75,230,.55),transparent 55%),radial-gradient(120% 140% at 8% 96%,rgba(37,255,134,.16),transparent 55%),linear-gradient(160deg,#141a2e,#0b0f1a 60%,#080a12)}
-    .hero-default .hd-badge{font-family:ui-monospace,Menlo,monospace;font-weight:800;color:#25ff86;font-size:26px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:4px 12px}
+    .hero-default .hd-badge{font-family:ui-monospace,Menlo,monospace;font-weight:800;color:#14532d;font-size:26px;background:#f6f2e9;border:1px solid rgba(20,83,45,.25);border-radius:12px;padding:4px 12px}
     .hero-default .hd-name{color:#fff;font-weight:800;font-size:clamp(20px,3.4vw,34px);letter-spacing:-.01em;padding:0 16px}
     .hero-default .hd-sub{color:#aeb6cc;font-family:ui-monospace,Menlo,monospace;font-size:13px}
     .tenant-hero .hero-meta{display:flex;gap:18px;flex-wrap:wrap;color:var(--ink2);font-size:14px;font-weight:600}
@@ -3407,12 +3409,12 @@ const APP_HTML = String.raw`<!doctype html>
   <header>
     <div class="brand" onclick="go('/')">
       <svg width="32" height="32" viewBox="0 0 40 40" aria-hidden="true" style="flex:0 0 auto">
-        <rect width="40" height="40" rx="11" fill="#0a0e0a"/>
-        <path d="M12 13 6.5 20 12 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M28 13 33.5 20 28 27" fill="none" stroke="#25ff86" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-        <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#25ff86">5</text>
+        <rect width="40" height="40" rx="11" fill="#f6f2e9" stroke="#14532d" stroke-opacity=".22"/>
+        <path d="M12 13 6.5 20 12 27" fill="none" stroke="#14532d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M28 13 33.5 20 28 27" fill="none" stroke="#14532d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="20" y="26.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="17" font-weight="800" fill="#14532d">5</text>
       </svg>
-      <span id="brandName">hack5</span></div>
+      <span id="brandName">Hack5</span></div>
     <nav id="nav"></nav>
   </header>
   <main id="app"></main>
@@ -3526,20 +3528,20 @@ const APP_HTML = String.raw`<!doctype html>
     '用 hack5.net,10 分钟拥有你自己的黑客松站点':'ด้วย hack5.net มีเว็บแฮกกาธอนของตัวเองใน 10 นาที',
     '为何要组织黑客松':'ทำไมต้องจัดแฮกกาธอน',
     '组织一场黑客松,是把你在意的主题变成行动的最好方式 —— 环保节能、开放协议、AI 安全,或任何你想推动的领域。你会聚起一群志同道合的人,放大相关社区与企业的影响力,也为新产品的发布与试用创造真实场景。对组织者来说,这是难得的契机:凝聚人、传播理念、发现人才与合作。':'การจัดแฮกกาธอนคือวิธีที่ดีที่สุดในการเปลี่ยนหัวข้อที่คุณใส่ใจให้เป็นการลงมือ — พลังงานสะอาด โปรโตคอลเปิด ความปลอดภัย AI หรือด้านใดก็ตามที่คุณอยากผลักดัน คุณจะรวมคนที่คิดเหมือนกัน ขยายอิทธิพลของคอมมิวนิตี้และองค์กรที่เกี่ยวข้อง และสร้างสนามจริงให้เปิดตัวและทดลองผลิตภัณฑ์ใหม่ สำหรับผู้จัด นี่คือโอกาสหายาก: รวมคน กระจายแนวคิด ค้นพบคนเก่งและความร่วมมือ',
-    'hack5 帮你搞定这些':'hack5 จัดการสิ่งเหล่านี้ให้คุณ', '三步启动你的黑客松':'เริ่มแฮกกาธอนของคุณใน 3 ขั้นตอน',
+    'Hack5 帮你搞定这些':'Hack5 จัดการสิ่งเหล่านี้ให้คุณ', '三步启动你的黑客松':'เริ่มแฮกกาธอนของคุณใน 3 ขั้นตอน',
     '延伸阅读:':'อ่านเพิ่มเติม:', '如何用免费工具办一场黑客松 · 完整指南':'จัดแฮกกาธอนด้วยเครื่องมือฟรี · คู่มือฉบับเต็ม',
     '办一场属于你的黑客松':'จัดแฮกกาธอนของคุณเอง', '🚀 现在就发起 →':'🚀 เริ่มเลยตอนนี้ →',
     '10 分钟发起':'เริ่มใน 10 นาที',
     '三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。':'3 ขั้นตอน: เข้าสู่ระบบ → ตั้งชื่อ → ดีพลอยคลิกเดียวได้เว็บแฮกกาธอนของคุณ (พร้อมโดเมนของตัวเอง)',
     '单场免费':'งานเดียวฟรี',
     '数字公共物品':'สินค้าสาธารณะดิจิทัล',
-    'hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。':'hack5 อยู่ภายใต้ Mycelium — องค์กรสินค้าสาธารณะดิจิทัล สร้างเพื่อคอมมิวนิตี้ผู้สร้างแบบเปิด',
+    'Hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。':'Hack5 อยู่ภายใต้ Mycelium — องค์กรสินค้าสาธารณะดิจิทัล สร้างเพื่อคอมมิวนิตี้ผู้สร้างแบบเปิด',
     '发起黑客松 →':'เริ่มจัดแฮกกาธอน →',
     '登录 → 取名 → 一键部署':'เข้าสู่ระบบ → ตั้งชื่อ → ดีพลอยคลิกเดียว',
     '一键发起功能正在上线中 —— 你将能在 10 分钟内拥有一个独立域名的黑客松站点。':'ฟีเจอร์เริ่มงานคลิกเดียวกำลังจะมา — คุณจะมีเว็บแฮกกาธอนพร้อมโดเมนของตัวเองได้ใน 10 นาที',
     '← 了解 hack5':'← รู้จัก hack5', '三步 · 10 分钟':'3 ขั้นตอน · 10 นาที',
     '登录 → 取名 → 一键部署你专属的黑客松站点。':'เข้าสู่ระบบ → ตั้งชื่อ → ดีพลอยคลิกเดียวได้เว็บแฮกกาธอนของคุณ',
-    'hack5 隶属于 Mycelium,为开放的创造者社区而建。':'hack5 อยู่ภายใต้ Mycelium สร้างเพื่อคอมมิวนิตี้ผู้สร้างแบบเปิด',
+    'Hack5 隶属于 Mycelium,为开放的创造者社区而建。':'Hack5 อยู่ภายใต้ Mycelium สร้างเพื่อคอมมิวนิตี้ผู้สร้างแบบเปิด',
     '三种规模,一键发起 · 独立域名 · 首场免费':'สามขนาด เริ่มคลิกเดียว · โดเมนของตัวเอง · งานแรกฟรี',
     '常规黑客松':'แฮกกาธอนทั่วไป', '10 分钟启动 · 200 人以下':'เริ่มใน 10 นาที · ไม่เกิน 200 คน',
     '公开报名、作品墙、评审打分——通用规模。':'เปิดรับสมัคร กำแพงผลงาน ให้คะแนน — ขนาดทั่วไป',
@@ -3566,14 +3568,14 @@ const APP_HTML = String.raw`<!doctype html>
     '支付通道即将上线。现在需要开通请联系我们。':'ช่องทางชำระเงินกำลังจะเปิด หากต้องการใช้ตอนนี้ กรุณาติดต่อเรา',
     '支付通道即将上线,我们会尽快开通。可先联系 Mycelium 团队。':'ช่องทางชำระเงินกำลังจะเปิด เราจะเปิดโดยเร็ว ติดต่อทีม Mycelium ได้ก่อน',
     '更新中':'กำลังอัปเดต', '打开':'เปิด', '媒体矩阵':'เครือข่ายสื่อ',
-    'hack5 · Mycelium 触达开源开发者社区的自有渠道':'hack5 · ช่องทางของ Mycelium สู่คอมมิวนิตี้นักพัฒนาโอเพนซอร์ส',
+    'Hack5 · Mycelium 触达开源开发者社区的自有渠道':'Hack5 · ช่องทางของ Mycelium สู่คอมมิวนิตี้นักพัฒนาโอเพนซอร์ส',
     '渠道':'ช่องทาง', '触达':'การเข้าถึง', '主要话题':'หัวข้อหลัก', '链接':'ลิงก์',
     '每个参加过黑客松的开发者都留下 email —— 这是我们随每场活动持续增长的社区基础。':'นักพัฒนาทุกคนที่เคยเข้าแฮกกาธอนทิ้งอีเมลไว้ — นี่คือฐานคอมมิวนิตี้ที่เติบโตขึ้นทุกงาน',
     '成为赞助商':'มาเป็นผู้สนับสนุน',
-    '$1500 / 年 · 限 4 席。你的 logo 出现在所有 hack5 组织的黑客松页脚,并通过上面的渠道与订阅用户一起转发,触达开源开发者社区。所得用于覆盖平台成本、反哺更多数字公共物品。':'$1500 / ปี · จำกัด 4 ที่ โลโก้ของคุณจะปรากฏที่ท้ายหน้าแฮกกาธอนทุกงานของ hack5 และถูกส่งต่อผ่านช่องทางข้างต้นพร้อมผู้ติดตาม เข้าถึงคอมมิวนิตี้นักพัฒนาโอเพนซอร์ส รายได้ใช้ครอบคลุมต้นทุนแพลตฟอร์มและคืนสู่สินค้าสาธารณะดิจิทัล',
+    '$1500 / 年 · 限 4 席。你的 logo 出现在所有 Hack5 组织的黑客松页脚,并通过上面的渠道与订阅用户一起转发,触达开源开发者社区。所得用于覆盖平台成本、反哺更多数字公共物品。':'$1500 / ปี · จำกัด 4 ที่ โลโก้ของคุณจะปรากฏที่ท้ายหน้าแฮกกาธอนทุกงานของ Hack5 และถูกส่งต่อผ่านช่องทางข้างต้นพร้อมผู้ติดตาม เข้าถึงคอมมิวนิตี้นักพัฒนาโอเพนซอร์ส รายได้ใช้ครอบคลุมต้นทุนแพลตฟอร์มและคืนสู่สินค้าสาธารณะดิจิทัล',
     '了解 Mycelium →':'รู้จัก Mycelium →',
     '办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。':'จัดแฮกกาธอนฟรี เก็บบันทึกถาวร งานเพิ่มและฟีเจอร์ขั้นสูง (โปสเตอร์ไดนามิก แชร์คลิกเดียว บอทคอมมิวนิตี้) สมัครสมาชิกได้',
-    '关于 hack5':'เกี่ยวกับ hack5', '人人可办的黑客松平台':'แพลตฟอร์มแฮกกาธอนที่ทุกคนจัดได้',
+    '关于 Hack5':'เกี่ยวกับ Hack5', '人人可办的黑客松平台':'แพลตฟอร์มแฮกกาธอนที่ทุกคนจัดได้',
     '<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它让任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点:<b>第一场免费</b>、记录永久保留;想办更多场次、或用上动态海报、一键转发、开发者社区 Bot 等高级功能,可订阅付费。':'<b>hack5.net</b> อยู่ภายใต้ <b>Mycelium</b> — องค์กรสินค้าสาธารณะดิจิทัล (Digital Public Goods) ทุกคนสามารถเริ่มและดีพลอยเว็บแฮกกาธอนของตัวเองได้ <b>ใน 10 นาที</b>: <b>งานแรกฟรี</b> เก็บบันทึกถาวร หากอยากจัดเพิ่มหรือใช้ฟีเจอร์ขั้นสูงอย่างโปสเตอร์ไดนามิก แชร์คลิกเดียว บอทคอมมิวนิตี้ สมัครสมาชิกได้',
     '运营 · 账户管理':'ผู้ดูแลระบบ · จัดการบัญชี',
     '把用户设为 paid → 无限开企业私密 + mini + 常规;free → 走免费额度(企业私密免费不可开、mini 每人首场免费)。':'ตั้งผู้ใช้เป็น paid → เปิดองค์กรส่วนตัว + mini + ทั่วไปได้ไม่จำกัด; free → ใช้โควตาฟรี (องค์กรส่วนตัวเปิดฟรีไม่ได้ mini ฟรีงานแรกต่อคน)',
@@ -3700,10 +3702,10 @@ const APP_HTML = String.raw`<!doctype html>
 
   boot();
   async function boot(){
-    CONFIG = await api('/api/config').catch(()=>({appName:'hack5',platform:false,tenant:null,eventName:'Hackathon',minShots:2,maxShots:4,maxShotBytes:1048576,dims:['innovation','technical','completeness','presentation'],maxVideoSeconds:180}));
+    CONFIG = await api('/api/config').catch(()=>({appName:'Hack5',platform:false,tenant:null,eventName:'Hackathon',minShots:2,maxShots:4,maxShotBytes:1048576,dims:['innovation','technical','completeness','presentation'],maxVideoSeconds:180}));
     const brand = CONFIG.tenant ? CONFIG.tenant.name : CONFIG.appName;
     document.getElementById('brandName').textContent = brand;
-    document.title = CONFIG.tenant ? (brand + ' · ‹5› hack5') : '‹5› hack5: Launch Your Hackathon!';
+    document.title = CONFIG.tenant ? (brand + ' · ‹5› Hack5') : '‹5› Hack5: Launch Your Hackathon!';
     document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
     if(CONFIG.platform) ME_USER = await api('/api/platform/me').catch(()=>({email:null}));
     else ME = await api('/api/auth/me').catch(()=>({role:null}));
@@ -4011,7 +4013,7 @@ const APP_HTML = String.raw`<!doctype html>
       + t('组织一场黑客松,是把你在意的主题变成行动的最好方式 —— 环保节能、开放协议、AI 安全,或任何你想推动的领域。你会聚起一群志同道合的人,放大相关社区与企业的影响力,也为新产品的发布与试用创造真实场景。对组织者来说,这是难得的契机:凝聚人、传播理念、发现人才与合作。',
           'Organizing a hackathon is the best way to turn a theme you care about into action — climate & energy, open protocols, AI safety, or any field you want to push forward. You gather like-minded people, amplify the communities and companies around it, and create real settings to launch and trial new products. For an organizer it is a rare chance: to unite people, spread ideas, and find talent and partners.')
       + '</p></div></div>'
-      + '<h2 style="text-align:center;margin-top:30px">'+t('hack5 帮你搞定这些','What hack5 handles for you')+'</h2>'
+      + '<h2 style="text-align:center;margin-top:30px">'+t('Hack5 帮你搞定这些','What Hack5 handles for you')+'</h2>'
       + '<div class="guide-steps">'+orgFeats.map(f=>'<div class="step"><div class="num" style="background:#0a0e0a;font-size:19px">'+f[0]+'</div><div><h3>'+esc(f[1])+'</h3><p>'+esc(f[2])+'</p></div></div>').join('')+'</div>'
       + '<h2 style="text-align:center;margin-top:30px">'+t('三步启动你的黑客松','Three steps to launch')+'</h2>'
       + '<div class="guide-steps">'+launchSteps.map(s=>'<div class="step"><div class="num">'+s[0]+'</div><div><h3>'+s[1]+' '+esc(s[2])+'</h3><p>'+esc(s[3])+'</p></div></div>').join('')+'</div>'
@@ -4052,21 +4054,21 @@ const APP_HTML = String.raw`<!doctype html>
       +'<td class="muted">'+esc(m.topic)+'</td>'
       +'<td>'+(m.link?'<a href="'+esc(m.link)+'" target="_blank" rel="noopener">'+t('打开','open')+' ↗</a >':'<span class="muted">—</span>')+'</td></tr>').join('');
     app.innerHTML = '<div class="guide"><div class="guide-hero"><h1>'+t('媒体矩阵','Media matrix')+'</h1>'
-      +'<p class="guide-sub">'+t('hack5 · Mycelium 触达开源开发者社区的自有渠道','How hack5 · Mycelium reaches the open-source developer community')+'</p></div>'
+      +'<p class="guide-sub">'+t('Hack5 · Mycelium 触达开源开发者社区的自有渠道','How Hack5 · Mycelium reaches the open-source developer community')+'</p></div>'
       +'<div class="panel" style="overflow-x:auto"><table class="media-table"><thead><tr><th>'+t('渠道','Channel')+'</th><th>'+t('触达','Reach')+'</th><th>'+t('主要话题','Topics')+'</th><th>'+t('链接','Link')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
       +'<p class="muted" style="margin:12px 2px 0;font-size:12px">'+t('每个参加过黑客松的开发者都留下 email —— 这是我们随每场活动持续增长的社区基础。','Every hackathon participant leaves an email — a community base that grows with each event.')+'</p></div>'
       +'<div class="panel guide-cta" style="margin-top:20px"><h2>'+t('成为赞助商','Become a sponsor')+'</h2>'
-      +'<p style="color:rgba(255,255,255,.88)">'+t('$1500 / 年 · 限 4 席。你的 logo 出现在所有 hack5 组织的黑客松页脚,并通过上面的渠道与订阅用户一起转发,触达开源开发者社区。所得用于覆盖平台成本、反哺更多数字公共物品。','$1500 / year · 4 seats. Your logo in the footer of every hack5 hackathon, amplified across the channels above.')+'</p>'
+      +'<p style="color:rgba(255,255,255,.88)">'+t('$1500 / 年 · 限 4 席。你的 logo 出现在所有 Hack5 组织的黑客松页脚,并通过上面的渠道与订阅用户一起转发,触达开源开发者社区。所得用于覆盖平台成本、反哺更多数字公共物品。','$1500 / year · 4 seats. Your logo in the footer of every Hack5 hackathon, amplified across the channels above.')+'</p>'
       +'<a href="https://blog.mushroom.cv/" target="_blank" rel="noopener"><button>'+t('了解 Mycelium →','About Mycelium →')+'</button></a></div></div>';
   }
   function renderAbout(){
     const feats = [
       ['⚡', t('10 分钟发起','Live in 10 minutes'), t('三步:登录 → 取名 → 一键部署你专属的黑客松站点(带独立域名)。','Three steps: log in → name it → deploy your own hackathon site on its own domain.')],
       ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
-      ['🌱', t('数字公共物品','A digital public good'), t('hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
+      ['🌱', t('数字公共物品','A digital public good'), t('Hack5 隶属于 Mycelium —— 一个数字公共物品组织,为开放的创造者社区而建。','Hack5 is part of Mycelium — a digital-public-goods organization, built for an open community of makers.')],
     ];
     app.innerHTML = '<div class="guide">'
-      + '<div class="guide-hero"><h1>'+t('关于 hack5','About hack5')+'</h1>'
+      + '<div class="guide-hero"><h1>'+t('关于 Hack5','About Hack5')+'</h1>'
       + '<p class="guide-sub">'+t('人人可办的黑客松平台','a hackathon platform anyone can run')+'</p></div>'
       + '<div class="panel" style="font-size:16px;line-height:1.8;color:var(--ink2)">'
       + t('<b>hack5.net</b> 隶属于 <b>Mycelium</b> —— 一个数字公共物品(Digital Public Goods)组织。它让任何人都能在 <b>10 分钟内</b>发起并部署一个属于自己的黑客松站点:<b>第一场免费</b>、记录永久保留;想办更多场次、或用上动态海报、一键转发、开发者社区 Bot 等高级功能,可订阅付费。',
@@ -4128,7 +4130,7 @@ const APP_HTML = String.raw`<!doctype html>
       + '<p class="guide-sub">'+t('登录 → 取名 → 一键部署','log in → name it → deploy')+'</p></div>'
       + '<div class="panel" style="text-align:center;padding:40px">'
       + '<p style="font-size:16px">'+t('一键发起功能正在上线中 —— 你将能在 10 分钟内拥有一个独立域名的黑客松站点。','One-click launch is coming soon — you will get your own hackathon site, on its own domain, in 10 minutes.')+'</p>'
-      + '<div class="row" style="justify-content:center;margin-top:16px"><button class="ghost" onclick="go(\'/about\')">'+t('← 了解 hack5','← About hack5')+'</button></div>'
+      + '<div class="row" style="justify-content:center;margin-top:16px"><button class="ghost" onclick="go(\'/about\')">'+t('← 了解 Hack5','← About Hack5')+'</button></div>'
       + '</div></div>';
   }
 
@@ -4137,7 +4139,7 @@ const APP_HTML = String.raw`<!doctype html>
     const feats = [
       ['⚡', t('三步 · 10 分钟','3 steps · 10 min'), t('登录 → 取名 → 一键部署你专属的黑客松站点。','Log in → name it → deploy your own hackathon site.')],
       ['🆓', t('单场免费','First event free'), t('办一场黑客松免费,记录永久保留;更多场次与高级功能(动态海报、一键转发、社区 Bot)可订阅。','Your first hackathon is free with records kept forever; more events and premium features (dynamic posters, one-click sharing, a community bot) come with a subscription.')],
-      ['🌱', t('数字公共物品','Digital public good'), t('hack5 隶属于 Mycelium,为开放的创造者社区而建。','hack5 is part of Mycelium, built for open makers.')],
+      ['🌱', t('数字公共物品','Digital public good'), t('Hack5 隶属于 Mycelium,为开放的创造者社区而建。','Hack5 is part of Mycelium, built for open makers.')],
     ];
     app.innerHTML = '<div class="guide">'
       + '<div class="guide-hero" style="padding:44px 0 8px">'
@@ -4489,8 +4491,8 @@ const APP_HTML = String.raw`<!doctype html>
       + (bg
           ? '<rect width="794" height="1123" fill="#080a12"/><image href="'+bg+'" x="0" y="0" width="794" height="1123" preserveAspectRatio="xMidYMid slice"/><rect width="794" height="1123" fill="url(#pscrim)"/>'
           : '<rect width="794" height="1123" fill="url(#pbg)"/><rect width="794" height="1123" fill="url(#pglow)"/><rect width="794" height="1123" fill="url(#pglow2)"/><text x="470" y="1050" font-family="ui-monospace,monospace" font-size="520" font-weight="800" fill="#ffffff" opacity="0.03">5</text>')
-      + '<g transform="translate(64,74)"><rect width="52" height="52" rx="14" fill="#ffffff" opacity="0.08"/><rect width="52" height="52" rx="14" fill="none" stroke="#ffffff" stroke-opacity="0.14"/><text x="26" y="35" text-anchor="middle" font-family="ui-monospace,monospace" font-size="23" font-weight="800" fill="#25ff86">&#8249;5&#8250;</text></g>'
-      + '<text x="130" y="108" font-family="ui-monospace,monospace" font-size="27" font-weight="800" fill="#ffffff" letter-spacing="0.5">hack5</text>'
+      + '<g transform="translate(64,74)"><rect width="52" height="52" rx="14" fill="#f6f2e9"/><rect width="52" height="52" rx="14" fill="none" stroke="#14532d" stroke-opacity="0.3"/><text x="26" y="35" text-anchor="middle" font-family="ui-monospace,monospace" font-size="23" font-weight="800" fill="#14532d">&#8249;5&#8250;</text></g>'
+      + '<text x="130" y="108" font-family="ui-monospace,monospace" font-size="27" font-weight="800" fill="#ffffff" letter-spacing="0.5">Hack5</text>'
       + '<text x="730" y="105" text-anchor="end" font-family="-apple-system,sans-serif" font-size="13" fill="#8b93b5" letter-spacing="4">HACKATHON</text>';
     let y=300;
     if(eyebrow){ svg+='<text x="64" y="'+y+'" font-family="-apple-system,sans-serif" font-size="19" font-weight="600" fill="#8b7bff" letter-spacing="1.5">'+esc(eyebrow.slice(0,60))+'</text>'; y+=20; }
@@ -4524,7 +4526,7 @@ const APP_HTML = String.raw`<!doctype html>
     const url='https://'+sub+'.hack5.net';
     const meta=[]; if(tn.eventTime)meta.push('📅 '+tn.eventTime); if(tn.location)meta.push('📍 '+tn.location);
     const caption=(tn.name||'Hackathon')+'\n'+(tn.intro?tn.intro+'\n':'')+(meta.length?meta.join('   ')+'\n':'')
-      +'👉 '+t('报名 / 提交作品:','Join / submit: ')+url+'\n#hackathon #hack5';
+      +'👉 '+t('报名 / 提交作品:','Join / submit: ')+url+'\n#hackathon #Hack5';
     const hasNative = !!(navigator.share);
     app.innerHTML='<h1>'+t('一键转发','Share')+'</h1>'
       +'<p class="muted">'+t('下面是自动生成的海报和文案。复制文案 + 下载海报,发到公众号 / 小红书 / 微信群 / Telegram 群;手机可直接用系统分享。','Here are your auto-generated poster and caption. Copy the caption, download the poster, and post to your channels.')+'</p>'
@@ -4542,7 +4544,7 @@ const APP_HTML = String.raw`<!doctype html>
       +'<div class="muted" style="margin:14px 0 6px;font-size:12px">'+t('分享到平台','Post to a platform')+'</div>'
       +'<div class="share-plats">'
       +shareLink('https://service.weibo.com/share/share.php?url='+encodeURIComponent(url)+'&title='+encodeURIComponent(caption),'微博','#e6162d')
-      +shareLink('https://sns.qzone.qq.com/cgi-bin/qzshare/cgi_qzshare_onekey?url='+encodeURIComponent(url)+'&title='+encodeURIComponent((tn.name||'hack5'))+'&summary='+encodeURIComponent(caption),'QQ空间','#f7b500')
+      +shareLink('https://sns.qzone.qq.com/cgi-bin/qzshare/cgi_qzshare_onekey?url='+encodeURIComponent(url)+'&title='+encodeURIComponent((tn.name||'Hack5'))+'&summary='+encodeURIComponent(caption),'QQ空间','#f7b500')
       +shareLink('https://t.me/share/url?url='+encodeURIComponent(url)+'&text='+encodeURIComponent(caption),'Telegram','#229ed9')
       +shareLink('https://twitter.com/intent/tweet?text='+encodeURIComponent(caption),'X','#111')
       +shareLink('https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(url),'Facebook','#1877f2')
@@ -4560,7 +4562,7 @@ const APP_HTML = String.raw`<!doctype html>
       catch(e){ setMsg('shMsg',t('海报生成失败','Poster failed'),true); }
     });
     if(hasNative) $('#shNative').addEventListener('click',async()=>{
-      const data={ title:tn.name||'hack5', text:$('#shCap').value, url:url };
+      const data={ title:tn.name||'Hack5', text:$('#shCap').value, url:url };
       try{ const b=await posterBlob(); const f=new File([b],'hack5-poster.png',{type:'image/png'}); if(navigator.canShare && navigator.canShare({files:[f]})) data.files=[f]; }catch(e){}
       try{ await navigator.share(data); }catch(e){}
     });
@@ -5028,7 +5030,7 @@ const APP_HTML = String.raw`<!doctype html>
     }
     function downloadChat(){
       const body = msgs.map(m=>(m.who==='me'?'🧑 ':'🤖 ')+m.text).join('\n\n');
-      const head = '# '+((CONFIG.tenant&&CONFIG.tenant.name)||'hack5')+' · /make\n'+(projectSlug?('project: '+projectSlug+'\n'):'')+'\n';
+      const head = '# '+((CONFIG.tenant&&CONFIG.tenant.name)||'Hack5')+' · /make\n'+(projectSlug?('project: '+projectSlug+'\n'):'')+'\n';
       const blob = new Blob([head+body+'\n'], {type:'text/markdown;charset=utf-8'});
       const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='make-'+(projectSlug||'chat')+'.md';
       document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>{ try{ URL.revokeObjectURL(a.href); }catch(_){} }, 1000);
