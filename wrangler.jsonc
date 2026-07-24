@@ -3,6 +3,10 @@
   "name": "hackvideo",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-18",
+  // Static files (poster backgrounds, downloadable brand art) served directly by the platform —
+  // NOT base64-embedded in the Worker. Requests matching a file under ./public are served as assets;
+  // everything else falls through to the Worker (the SPA + API). Keep binary art here, not in code.
+  "assets": { "directory": "./public" },
   "observability": { "enabled": true },
   "workers_dev": false,
   "preview_urls": true,

@@ -197,6 +197,7 @@ export default {
       if (path === "/api/tenant/mini/usage" && method === "GET") return miniUsage(request, env, tenant, tid);
       // A3 — mini「做成应用」: multi-turn chat → repo provisioning + trigger loop
       if (path === "/api/tenant/mini/app/chat" && method === "POST") return miniAppChat(request, env, tenant, tid);
+      if (path === "/api/tenant/mini/app/history" && method === "GET") return miniAppHistory(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/launch" && method === "POST") return miniAppLaunch(request, env, tenant, tid);
       if (path === "/api/tenant/mini/app/deploy" && method === "POST") return miniAppDeploy(request, env, tenant, tid);
       // ---- WorkBench usage aggregation smoke test (mock only; inert in production) ----
@@ -1379,12 +1380,21 @@ async function createTeamPost(request: Request, env: Env, tenant: Tenant | null)
     .bind(tenant.id)
     .first<{ c: number }>();
   if ((total?.c ?? 0) >= 500) return json({ error: "组队墙已满 / Board full" }, 403);
-  const recent = await env.DB.prepare(
-    "SELECT COUNT(*) AS c FROM team_posts WHERE tenant_id = ? AND request_ip = ? AND created_at > ?",
+  // Don't let the same person spam the board: reject an exact-duplicate contact, and cap each
+  // poster (by IP) at 3 cards per hackathon. There's no login on this form, so IP + contact are
+  // the only stable identity signals — good enough to stop repeats without blocking real teams.
+  const dup = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM team_posts WHERE tenant_id = ? AND contact = ?",
   )
-    .bind(tenant.id, ip, now - 60 * 60)
+    .bind(tenant.id, contact)
     .first<{ c: number }>();
-  if ((recent?.c ?? 0) >= 10) return json({ error: "发布过于频繁,请稍后再试 / Too many posts" }, 429);
+  if ((dup?.c ?? 0) >= 1) return json({ error: "这个联系方式已经发过组队卡片了,不用重复发 / You already posted with this contact" }, 429);
+  const mine = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM team_posts WHERE tenant_id = ? AND request_ip = ?",
+  )
+    .bind(tenant.id, ip)
+    .first<{ c: number }>();
+  if ((mine?.c ?? 0) >= 3) return json({ error: "每人最多发布 3 条组队卡片 / Max 3 team posts per person" }, 429);
 
   await env.DB.prepare(
     "INSERT INTO team_posts (id, tenant_id, name, contact, skills, looking_for, idea, created_at, request_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2053,10 +2063,116 @@ async function miniAppChat(request: Request, env: Env, tenant: Tenant | null, ti
     }
     const scoped = await mintScopedChatToken(env, clientSlug, projectSlug);
     const res = await wb.chat({ clientSlug, projectSlug, input, lang }, { scopedToken: scoped });
-    return json({ ok: true, clientSlug, projectSlug, readiness: res.result.readiness, reply: res.result.reply ?? "" });
+    const reply = res.result.reply ?? "";
+    // Persist the running transcript server-side for a returning (registered) participant, so a reload
+    // on another browser/device brings the conversation back. Best-effort — a persistence failure must
+    // never break the chat turn.
+    await persistMakeTurn(env, tid, request, clientSlug, projectSlug, input, reply, res.result.readiness).catch(() => {});
+    return json({ ok: true, clientSlug, projectSlug, readiness: res.result.readiness, reply });
   } catch {
     return json({ error: "WorkBench 暂不可用,请稍后再试 / WorkBench unavailable" }, 502);
   }
+}
+
+// Append one chat turn (user input + AI reply) to the participant's server-side conversation.
+// Identity is the signed hv_part session's email → the SAME HMAC key as launched submissions
+// (owner='mini', repo_name = HMAC(AUTH_SECRET,"mini:"+email)[:40]); never a client-supplied email.
+// Anonymous chats (no session) are skipped — they stay localStorage-only on the client.
+async function persistMakeTurn(
+  env: Env,
+  tid: string,
+  request: Request,
+  clientSlug: string,
+  projectSlug: string,
+  input: string,
+  reply: string,
+  readiness: { score?: number; loop_ready?: boolean } | undefined,
+): Promise<void> {
+  const me = await getParticipant(request, env, tid);
+  if (!me?.email) return;
+  const emailKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${me.email}`)).slice(0, 40);
+  const now = unixNow();
+  const row = await env.DB.prepare(
+    "SELECT id, msgs FROM make_conversations WHERE tenant_id = ? AND email_key = ? AND wb_project = ?",
+  )
+    .bind(tid, emailKey, projectSlug)
+    .first<{ id: string; msgs: string }>();
+  let msgs: Array<{ who: string; text: string }> = [];
+  if (row?.msgs) {
+    try {
+      const parsed = JSON.parse(row.msgs);
+      if (Array.isArray(parsed)) msgs = parsed;
+    } catch {
+      msgs = [];
+    }
+  }
+  msgs.push({ who: "me", text: input });
+  if (reply) msgs.push({ who: "ai", text: reply });
+  if (msgs.length > 200) msgs = msgs.slice(-200); // cap runaway transcripts
+  const readinessJson = readiness ? JSON.stringify(readiness) : null;
+  const ready = readiness?.loop_ready ? 1 : 0;
+  const msgsJson = JSON.stringify(msgs);
+  if (row) {
+    await env.DB.prepare(
+      "UPDATE make_conversations SET msgs = ?, readiness = ?, ready = ?, last_idea = ?, wb_client = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(msgsJson, readinessJson, ready, input.slice(0, 300), clientSlug, now, row.id)
+      .run();
+  } else {
+    await env.DB.prepare(
+      "INSERT INTO make_conversations (id, tenant_id, email_key, wb_client, wb_project, msgs, readiness, ready, last_idea, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+      .bind(crypto.randomUUID(), tid, emailKey, clientSlug, projectSlug, msgsJson, readinessJson, ready, input.slice(0, 300), now, now)
+      .run();
+  }
+}
+
+// GET /api/tenant/mini/app/history — a returning participant's most recent /make conversation plus
+// any launched build, both keyed off the signed session (never a client-supplied email). Returns
+// {authed:false} for anonymous sessions so the client falls back to localStorage.
+async function miniAppHistory(request: Request, env: Env, tenant: Tenant | null, tid: string | null): Promise<Response> {
+  if (!tenant || tenant.mode !== "mini" || !tid) return json({ error: "Not found" }, 404);
+  const me = await getParticipant(request, env, tid);
+  if (!me?.email) return json({ authed: false });
+  const emailKey = (await hmacHex(utf8(env.AUTH_SECRET), `mini:${me.email}`)).slice(0, 40);
+  const conv = await env.DB.prepare(
+    "SELECT wb_client, wb_project, msgs, readiness, ready, last_idea FROM make_conversations WHERE tenant_id = ? AND email_key = ? ORDER BY updated_at DESC LIMIT 1",
+  )
+    .bind(tid, emailKey)
+    .first<{ wb_client: string | null; wb_project: string; msgs: string; readiness: string | null; ready: number; last_idea: string | null }>();
+  let conversation: unknown = null;
+  if (conv) {
+    let msgs: unknown = [];
+    try {
+      const parsed = JSON.parse(conv.msgs || "[]");
+      msgs = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      msgs = [];
+    }
+    let readiness: unknown = null;
+    try {
+      readiness = conv.readiness ? JSON.parse(conv.readiness) : null;
+    } catch {
+      readiness = null;
+    }
+    conversation = {
+      clientSlug: conv.wb_client || "",
+      projectSlug: conv.wb_project || "",
+      msgs,
+      readiness,
+      ready: conv.ready === 1,
+      lastIdea: conv.last_idea || "",
+    };
+  }
+  const sub = await env.DB.prepare(
+    "SELECT id, project_name, repo_url, app_url, build_state FROM submissions WHERE tenant_id = ? AND repo_owner = 'mini' AND repo_name = ? ORDER BY updated_at DESC LIMIT 1",
+  )
+    .bind(tid, emailKey)
+    .first<{ id: string; project_name: string; repo_url: string | null; app_url: string | null; build_state: string | null }>();
+  const launched = sub
+    ? { projectName: sub.project_name, repoUrl: sub.repo_url || "", appUrl: sub.app_url || "", buildState: sub.build_state || "", viewUrl: `/s/${sub.id}` }
+    : null;
+  return json({ authed: true, conversation, launched });
 }
 
 // Once the spec is loop_ready: create the participant's public repo (B2), push the spec, and
@@ -3232,8 +3348,8 @@ const APP_HTML = String.raw`<!doctype html>
   <meta name="twitter:description" content="报名、作品墙、评审打分、海报、组队、一键转发。开源公共物品,第一场免费。">
   <meta name="twitter:image" content="https://hack5.net/og.png">
   <style>
-    :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--card:#fff;--ink:#14161c;--ink2:#3c4250;--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10);--ghost-bg:#fff;--ghost-hover:#eef1f6;--input-bg:#fff;--header-bg:rgba(255,255,255,.9);--info-bg:#eef4ff;--info-ink:#25408f;--ok-bg:#e9f8f1;--err-bg:#fdeeec}
-    :root[data-theme="dark"]{color-scheme:dark;--bg:#0d1017;--panel:#161b24;--card:#161b24;--ink:#e7eaf0;--ink2:#aeb6c4;--muted:#8b94a3;--line:#28303c;--brand:#8b7bff;--brand-dark:#7a68ff;--ok:#3fca8f;--danger:#ff6b5b;--shadow:0 14px 44px rgba(0,0,0,.45);--ghost-bg:#1b212b;--ghost-hover:#232b37;--input-bg:#11161e;--header-bg:rgba(13,16,23,.9);--info-bg:#16233f;--info-ink:#9db8ff;--ok-bg:#123026;--err-bg:#33191a}
+    :root{color-scheme:light;--bg:#f6f7fb;--panel:#fff;--card:#fff;--ink:#14161c;--ink2:#3c4250;--muted:#5f6675;--line:#e2e6ee;--brand:#5b4be6;--brand-dark:#4536c9;--ok:#0f9d6b;--danger:#c0392b;--shadow:0 14px 44px rgba(24,28,52,.10);--ghost-bg:#fff;--ghost-hover:#eef1f6;--input-bg:#fff;--header-bg:#ffffff;--info-bg:#eef4ff;--info-ink:#25408f;--ok-bg:#e9f8f1;--err-bg:#fdeeec}
+    :root[data-theme="dark"]{color-scheme:dark;--bg:#0d1017;--panel:#161b24;--card:#161b24;--ink:#e7eaf0;--ink2:#aeb6c4;--muted:#8b94a3;--line:#28303c;--brand:#8b7bff;--brand-dark:#7a68ff;--ok:#3fca8f;--danger:#ff6b5b;--shadow:0 14px 44px rgba(0,0,0,.45);--ghost-bg:#1b212b;--ghost-hover:#232b37;--input-bg:#11161e;--header-bg:#0d1017;--info-bg:#16233f;--info-ink:#9db8ff;--ok-bg:#123026;--err-bg:#33191a}
     *{box-sizing:border-box}
     body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
     a{color:var(--brand);text-decoration:none}
@@ -3443,7 +3559,7 @@ const APP_HTML = String.raw`<!doctype html>
   const LANG_NEXT = { zh: 'en', en: 'th', th: 'zh' };            // toggle cycle
   const LANG_LABEL = { zh: '中文', en: 'EN', th: 'ไทย' };          // label of a given lang
   const LANG_HTMLLANG = { zh: 'zh-CN', en: 'en', th: 'th' };
-  window.toggleLang = () => { LANG = LANG_NEXT[LANG] || 'zh'; lsSet('hv_lang', LANG); document.documentElement.lang = LANG_HTMLLANG[LANG] || 'zh-CN'; renderNav(); route(); };
+  window.toggleLang = () => { LANG = LANG_NEXT[LANG] || 'zh'; lsSet('hv_lang', LANG); document.documentElement.lang = LANG_HTMLLANG[LANG] || 'zh-CN'; renderNav(); renderOrgFooter(); renderSponsorFooter(); route(); };
   // Thai dictionary, keyed by the Chinese source string (first arg of t). Covers the mini participant
   // journey (nav / register / my-hackathon / make / submit / gallery / common). Anything not here
   // falls back to English — coverage grows incrementally without breaking screens.
@@ -3762,7 +3878,7 @@ const APP_HTML = String.raw`<!doctype html>
          + '<span class="who">'+esc(ME.name)+' · '+(ME.role==='admin'?t('管理','Admin'):t('评委','Judge'))+'</span>'
          + '<button onclick="logout()">'+t('退出','Logout')+'</button>';
     } else {
-      h += '<button onclick="go(\'/judge\')">'+t('评审入口','Judge login')+'</button>';
+      h += '<button onclick="go(\'/judge\')">'+t('评审 / 管理','Judge / Admin')+'</button>';
     }
     h += themeBtn() + '<button class="ghost" onclick="toggleLang()" title="中 / EN / ไทย">'+LANG_LABEL[LANG_NEXT[LANG]]+'</button>';
     n.innerHTML = h;
@@ -4392,6 +4508,7 @@ const APP_HTML = String.raw`<!doctype html>
   let PHOTOS = []; // pending uploads: {dataUrl}
   async function renderPhotos(){
     app.innerHTML = '<h1>'+t('照片墙','Photo wall')+'</h1><p class="muted">'+t('黑客松现场花絮','Moments from the event')+'</p>'
+      + (ME.role!=='admin' ? '<p class="muted" style="font-size:13px">'+t('主办方 / 管理员:登录后可在此上传与管理照片','Organizer / admin: log in to upload and manage photos here')+' <a href="/judge" onclick="go(\'/judge\');return false">'+t('去登录 →','Log in →')+'</a></p>' : '')
       + (ME.role==='admin' ? '<div class="panel" style="margin-bottom:18px"><h2>'+t('上传照片','Upload photos')+'</h2>'
           + '<p class="muted">'+t('建议至少 5 张,自动压缩到 120KB 以内','At least 5 recommended, auto-compressed to ≤120KB')+'</p>'
           + '<input id="phFiles" type="file" accept="image/*" multiple>'
@@ -4597,11 +4714,38 @@ const APP_HTML = String.raw`<!doctype html>
     const isAdmin = ME.role==='admin';
     app.innerHTML = '<div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap"><h1>'+t('宣传海报','Promo poster')+'</h1>'
       + '<div class="row"><button id="dlPng">'+t('下载 PNG','Download PNG')+'</button><button class="ghost" id="dlSvg">'+t('下载 SVG','Download SVG')+'</button></div></div>'
-      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。免费可换成 AI 固定画风背景。','A4 portrait, auto-built from your homepage info. Free AI (fixed style) background available.')+'</p>'
+      + '<p class="muted">'+t('A4 竖版,用你首页的信息(名称/时间/地点)自动生成。海报 = 背景图 + 文字,下面随便换背景。','A4 portrait, auto-built from your homepage info. A poster is just a background + text — swap the background below.')+'</p>'
+      + '<div class="panel" style="max-width:640px;margin-bottom:16px"><b>'+t('背景','Background')+'</b>'
+      +   '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:8px">'
+      +     '<button class="ghost bgp" data-bg="">'+t('无背景','None')+'</button>'
+      +     '<button class="ghost bgp" data-bg="/poster-bg/cyberpunk.jpg">🌃 '+t('赛博朋克','Cyberpunk')+'</button>'
+      +     '<button class="ghost bgp" data-bg="/poster-bg/cartoon.jpg">🎨 '+t('卡通漫画','Cartoon')+'</button>'
+      +     '<label class="ghost" style="cursor:pointer;padding:9px 15px;border-radius:8px;background:var(--ghost-bg);border:1px solid var(--line);font-weight:650">📤 '+t('上传背景','Upload')+'<input id="bgUp" type="file" accept="image/*" style="display:none"></label>'
+      +   '</div>'
+      +   '<div class="muted" style="font-size:12px;margin-top:8px">'+t('更多风格可下载:','More styles to download:')
+      +     ' <a href="/poster-bg/birds.jpg" download>🕊 '+t('天空飞鸟','Sky birds')+'</a > · '
+      +     '<a href="/poster-bg/illustration.jpg" download>🖼 '+t('写实插画','Illustration')+'</a > · '
+      +     '<a href="/poster-bg/cyberpunk.jpg" download>🌃 '+t('赛博朋克','Cyberpunk')+'</a > · '
+      +     '<a href="/poster-bg/cartoon.jpg" download>🎨 '+t('卡通','Cartoon')+'</a >'
+      +   '</div><div id="bgMsg" class="muted" style="font-size:12px;margin-top:4px"></div></div>'
       + (isAdmin ? '<div id="aiPanel" class="panel" style="max-width:640px;margin-bottom:16px"><span class="muted">'+t('加载中…','Loading…')+'</span></div>' : '')
       + '<div id="posterBox" style="max-width:460px;border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)"></div>';
     paint('');
     if(isAdmin) loadAiPanel();
+    // Poster background = a fetched image turned into a data URI before it goes into the SVG, so the
+    // canvas PNG export stays untainted (an external <image href> would taint it). Presets are real
+    // static files under /poster-bg/, never base64 baked into this bundle.
+    async function bgFromUrl(url){ const r=await fetch(url); if(!r.ok) throw new Error('bg '+r.status); const b=await r.blob(); return await new Promise((res,rej)=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.onerror=()=>rej(new Error('read')); fr.readAsDataURL(b); }); }
+    document.querySelectorAll('.bgp').forEach(b=>b.addEventListener('click', async ()=>{
+      const u=b.dataset.bg||'';
+      if(!u){ paint(''); setMsg('bgMsg',''); return; }
+      const old=b.textContent; b.disabled=true; b.textContent='…';
+      try{ paint(await bgFromUrl(u)); setMsg('bgMsg', t('背景已应用,可直接下载','Background applied — download it')); }
+      catch(e){ setMsg('bgMsg', t('背景加载失败','Background failed to load'), true); }
+      finally{ b.disabled=false; b.textContent=old; }
+    }));
+    const bgUp=$('#bgUp');
+    if(bgUp) bgUp.addEventListener('change', async ev=>{ const f=ev.target.files[0]; ev.target.value=''; if(!f) return; try{ paint(await compressBanner(f)); setMsg('bgMsg', t('背景已应用','Background applied')); }catch(e){ setMsg('bgMsg', e.message, true); } });
     $('#dlSvg').addEventListener('click', ()=>{ const b=new Blob([window.__posterSvg],{type:'image/svg+xml'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download='hack5-poster.svg'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); });
     $('#dlPng').addEventListener('click', ()=>{
       const img=new Image(); const url=URL.createObjectURL(new Blob([window.__posterSvg],{type:'image/svg+xml;charset=utf-8'}));
@@ -4684,7 +4828,7 @@ const APP_HTML = String.raw`<!doctype html>
   function renderTeams(){
     if(!CONFIG.tenant){ go('/'); return; }
     app.innerHTML='<h1>'+t('组队 · 找队友','Find teammates')+'</h1>'
-      +'<p class="muted">'+t('发一张卡片:你会什么、想做什么、想找什么样的队友。联系方式会公开显示,方便别人直接找你。','Post a card: what you can do, what you want to build, who you are looking for. Your contact is shown publicly so others can reach you.')+'</p>'
+      +'<p class="muted">'+t('发一张卡片:你会什么、想做什么、想找什么样的队友。联系方式会公开显示,方便别人直接找你。每人最多 3 条,同一联系方式不要重复发。','Post a card: what you can do, what you want to build, who you are looking for. Your contact is shown publicly so others can reach you. Up to 3 posts per person; don’t repost the same contact.')+'</p>'
       +'<div class="panel" style="max-width:560px;margin-bottom:20px"><div id="tmForm">'
       +'<label>'+t('昵称','Name')+' *</label><input id="tmName" maxlength="40">'
       +'<label>'+t('联系方式','Contact')+' * (TG / '+t('微信','WeChat')+' / '+t('邮箱','Email')+')</label><input id="tmContact" maxlength="80" placeholder="TG @you / '+t('微信','WeChat')+' your-id">'
@@ -5089,15 +5233,38 @@ const APP_HTML = String.raw`<!doctype html>
         clearDraft(); // build is queued and the repo is the artifact now — drop the saved chat draft
       }catch(e){ setMsg('mkMsg', e.message, true); $('#mkGo').disabled=false; }
     }
-    // Restore a saved conversation (this browser) so a reload / navigation doesn't lose it.
-    const saved=loadDraft();
-    if(saved){
-      clientSlug=saved.clientSlug||''; projectSlug=saved.projectSlug||''; lastIdea=saved.lastIdea||''; lastReadiness=saved.lastReadiness||null;
-      saved.msgs.forEach(m=>addMsg(m.who,m.text));
+    function hydrateFromDraft(d){
+      clientSlug=d.clientSlug||''; projectSlug=d.projectSlug||''; lastIdea=d.lastIdea||''; lastReadiness=d.readiness||d.lastReadiness||null;
+      msgs=Array.isArray(d.msgs)?d.msgs.slice():[]; msgs.forEach(m=>addMsg(m.who,m.text));
       paintReady(lastReadiness);
-      if(saved.ready){ ready=true; showLaunch(); }
+      if(d.ready){ ready=true; showLaunch(); }
       renderTools();
     }
+    function showLaunchedBanner(l){
+      const box=$('#launchBox'); if(!box||!l) return;
+      const stMap={queued:['⏳',t('排队中','Queued')],planning:['🛠',t('构建中','Building')],coding:['🛠',t('构建中','Building')],reviewing:['🛠',t('构建中','Building')],deployed:['✅',t('已上线','Live')],failed:['⚠️',t('构建失败','Build failed')]};
+      const m=stMap[l.buildState]||['📦',esc(l.buildState||'')];
+      box.innerHTML='<div class="notice">'+m[0]+' <b>'+esc(l.projectName||'')+'</b> · '+m[1]
+        +(l.appUrl?' · <a href="'+esc(l.appUrl)+'" target="_blank" rel="noopener">'+t('打开应用','Open app')+'</a >':'')
+        +(l.repoUrl?' · <a href="'+esc(l.repoUrl)+'" target="_blank" rel="noopener">'+t('仓库','Repo')+'</a >':'')
+        +(l.viewUrl?' · <a href="'+esc(l.viewUrl)+'" onclick="go(\''+esc(l.viewUrl)+'\');return false">'+t('作品详情','Details')+'</a >':'')
+        +'</div>';
+    }
+    // Prefer server-side history (cross-browser, and it survives the localStorage clear on launch) for a
+    // returning registered participant; fall back to this-browser localStorage for anonymous users. If
+    // the participant already launched a build, show its live status/links.
+    (async ()=>{
+      let hydrated=false, launchedInfo=null;
+      try{
+        const h=await api('/api/tenant/mini/app/history');
+        if(h && h.authed){
+          launchedInfo=h.launched||null;
+          if(h.conversation && Array.isArray(h.conversation.msgs) && h.conversation.msgs.length){ hydrateFromDraft(h.conversation); hydrated=true; }
+        }
+      }catch(e){}
+      if(!hydrated){ const saved=loadDraft(); if(saved) hydrateFromDraft(saved); }
+      if(launchedInfo) showLaunchedBanner(launchedInfo);
+    })();
     $('#chatSend').addEventListener('click', send);
     $('#chatIn').addEventListener('keydown', e=>{ if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); send(); } });
   }
